@@ -1,4 +1,4 @@
-# ruff: noqa: ASYNC109 -- BaseSession's abstract API requires timeout parameters.
+# ruff: noqa: ASYNC109, RUF001 -- framework signature and intentional Russian UI text.
 
 from __future__ import annotations
 
@@ -30,24 +30,23 @@ from arbitrage_bot.domain import BuyFeeMode, Exchange, ExchangeQuote, RateSnapsh
 from arbitrage_bot.formatting import format_spread_message
 from arbitrage_bot.keyboards import (
     CALCULATE_BUTTON,
-    FEEDBACK_BUTTON,
-    HELP_BUTTON,
     SHOW_SPREAD_BUTTON,
     SUBSCRIBE_BUTTON,
+    SUPPORT_BUTTON,
     UNSUBSCRIBE_BUTTON,
 )
 from arbitrage_bot.repository import SQLiteRepository
 from arbitrage_bot.texts import (
     AMOUNT_PROMPT,
-    FEEDBACK_TEXT,
     HELP_TEXT,
     START_TEXT,
     SUBSCRIBED_TEXT,
+    SUPPORT_TEXT,
     UNSUBSCRIBED_TEXT,
 )
 
 _CHAT_ID = 1001
-_SUPPORT_URL = "https://t.me/darkvasyak"
+_SUPPORT_URL = "https://t.me/vardumyans"
 
 
 class RecordingSession(BaseSession):
@@ -146,12 +145,22 @@ def _reply_button_texts(message: SendMessage) -> set[str]:
 
 
 def _assert_support_link(message: SendMessage) -> None:
-    assert message.text == FEEDBACK_TEXT
+    assert message.text == SUPPORT_TEXT
     markup = message.reply_markup
     assert isinstance(markup, InlineKeyboardMarkup)
     assert len(markup.inline_keyboard) == 1
     assert len(markup.inline_keyboard[0]) == 1
     assert markup.inline_keyboard[0][0].url == _SUPPORT_URL
+
+
+def test_command_texts_match_the_public_menu_copy() -> None:
+    assert (
+        "В расчете по сумме учитываются настроенные комиссии Altyn и актуальная комиссия Rapira."
+    ) in START_TEXT
+    assert START_TEXT.endswith("Можно также нажать «Показать спред» или «Поддержка».")
+    assert "Exchange" not in START_TEXT
+    assert "🇧🇾" not in START_TEXT
+    assert HELP_TEXT.endswith("/help - команды бота")
 
 
 async def test_all_requested_private_chat_flows(tmp_path: Path) -> None:
@@ -171,6 +180,8 @@ async def test_all_requested_private_chat_flows(tmp_path: Path) -> None:
         telegram_bot_token=bot.token,
         database_path=tmp_path / "handlers.sqlite3",
         support_url=_SUPPORT_URL,
+        altyn_buy_fee_rate=Decimal("0"),
+        altyn_sell_fee_rate=Decimal("0"),
     )
     dispatcher = build_dispatcher(repository, settings)
     harness = HandlerHarness(bot, dispatcher, repository, session)
@@ -221,15 +232,9 @@ async def test_all_requested_private_chat_flows(tmp_path: Path) -> None:
         assert await repository.is_subscribed(_CHAT_ID) is True
 
         replies = await harness.feed("/help")
-        assert len(replies) == 2
-        assert replies[0].text == HELP_TEXT
-        _assert_support_link(replies[1])
+        assert [reply.text for reply in replies] == [HELP_TEXT]
 
-        replies = await harness.feed(HELP_BUTTON)
-        assert len(replies) == 1
-        _assert_support_link(replies[0])
-
-        replies = await harness.feed(FEEDBACK_BUTTON)
+        replies = await harness.feed(SUPPORT_BUTTON)
         assert len(replies) == 1
         _assert_support_link(replies[0])
     finally:

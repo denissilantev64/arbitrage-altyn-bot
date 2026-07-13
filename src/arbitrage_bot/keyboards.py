@@ -11,8 +11,7 @@ SHOW_SPREAD_BUTTON = "Показать спред"
 CALCULATE_BUTTON = "Рассчитать прибыль"
 SUBSCRIBE_BUTTON = "Включить подписку"
 UNSUBSCRIBE_BUTTON = "Отключить подписку"
-HELP_BUTTON = "Помощь"
-FEEDBACK_BUTTON = "Обратная связь"
+SUPPORT_BUTTON = "Поддержка"
 
 
 def main_keyboard(subscribed: bool) -> ReplyKeyboardMarkup:
@@ -24,10 +23,7 @@ def main_keyboard(subscribed: bool) -> ReplyKeyboardMarkup:
                 KeyboardButton(text=CALCULATE_BUTTON),
             ],
             [KeyboardButton(text=subscription_button)],
-            [
-                KeyboardButton(text=HELP_BUTTON),
-                KeyboardButton(text=FEEDBACK_BUTTON),
-            ],
+            [KeyboardButton(text=SUPPORT_BUTTON)],
         ],
         resize_keyboard=True,
         is_persistent=True,

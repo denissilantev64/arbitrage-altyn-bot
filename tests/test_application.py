@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 from aiogram.fsm.storage.base import BaseEventIsolation
 from aiogram.fsm.storage.memory import SimpleEventIsolation
 
+from arbitrage_bot import application
 from arbitrage_bot.application import _cancel_tasks, _supervise_runtime, build_dispatcher
 from arbitrage_bot.config import Settings
 from arbitrage_bot.repository import SQLiteRepository
@@ -51,10 +53,86 @@ def test_dispatcher_uses_event_isolation() -> None:
     settings = Settings(
         telegram_bot_token="123456789:test-token",
         database_path=Path(":memory:"),
-        support_url="https://t.me/darkvasyak",
+        support_url="https://t.me/vardumyans",
+        altyn_buy_fee_rate=Decimal("0"),
+        altyn_sell_fee_rate=Decimal("0"),
     )
 
     dispatcher = build_dispatcher(repository, settings)
 
     isolation: BaseEventIsolation = dispatcher.fsm.events_isolation
     assert isinstance(isolation, SimpleEventIsolation)
+
+
+async def test_run_passes_altyn_fee_rates_to_collector(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class ExpectedStop(Exception):
+        pass
+
+    class FakeRepository:
+        def __init__(self, database_path: Path) -> None:
+            assert database_path == tmp_path / "bot.sqlite3"
+
+        async def connect(self) -> None:
+            return None
+
+        async def initialize(self) -> None:
+            return None
+
+        async def close(self) -> None:
+            return None
+
+    session = object()
+
+    class FakeClientSession:
+        def __init__(self, **kwargs: object) -> None:
+            assert "timeout" in kwargs
+
+        async def __aenter__(self) -> object:
+            return session
+
+        async def __aexit__(self, *args: object) -> None:
+            return None
+
+    captured: dict[str, object] = {}
+
+    class FakeRateCollector:
+        def __init__(
+            self,
+            received_session: object,
+            *,
+            altyn_buy_fee_rate: Decimal,
+            altyn_sell_fee_rate: Decimal,
+        ) -> None:
+            captured.update(
+                session=received_session,
+                buy=altyn_buy_fee_rate,
+                sell=altyn_sell_fee_rate,
+            )
+
+    async def stop_after_collector_creation(*args: object) -> None:
+        raise ExpectedStop
+
+    monkeypatch.setattr(application, "SQLiteRepository", FakeRepository)
+    monkeypatch.setattr(application.aiohttp, "ClientSession", FakeClientSession)
+    monkeypatch.setattr(application, "RateCollector", FakeRateCollector)
+    monkeypatch.setattr(application, "collect_and_store_rates", stop_after_collector_creation)
+
+    settings = Settings(
+        telegram_bot_token="123456789:test-token",
+        database_path=tmp_path / "bot.sqlite3",
+        support_url="https://t.me/vardumyans",
+        altyn_buy_fee_rate=Decimal("0.0025"),
+        altyn_sell_fee_rate=Decimal("0.0004"),
+    )
+
+    with pytest.raises(ExpectedStop):
+        await application.run(settings)
+
+    assert captured == {
+        "session": session,
+        "buy": Decimal("0.0025"),
+        "sell": Decimal("0.0004"),
+    }

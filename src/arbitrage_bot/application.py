@@ -39,7 +39,11 @@ async def run(settings: Settings) -> None:
             timeout=timeout,
             headers={"User-Agent": "arbitrage-altyn-bot/0.1"},
         ) as http_session:
-            collector = RateCollector(http_session)
+            collector = RateCollector(
+                http_session,
+                altyn_buy_fee_rate=settings.altyn_buy_fee_rate,
+                altyn_sell_fee_rate=settings.altyn_sell_fee_rate,
+            )
             await collect_and_store_rates(collector, repository)
 
             bot = Bot(
@@ -62,7 +66,7 @@ async def run(settings: Settings) -> None:
                         BotCommand(command="spread", description="показать спред USDT/RUB"),
                         BotCommand(command="subscribe", description="включить уведомления"),
                         BotCommand(command="unsubscribe", description="отключить уведомления"),
-                        BotCommand(command="help", description="команды и обратная связь"),
+                        BotCommand(command="help", description="команды бота"),
                     ]
                 )
                 rate_task = asyncio.create_task(

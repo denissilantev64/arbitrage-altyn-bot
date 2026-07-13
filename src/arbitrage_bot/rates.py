@@ -8,9 +8,7 @@ from typing import Final, cast
 import aiohttp
 
 from .constants import (
-    ALTYN_BUY_FEE_RATE,
     ALTYN_RATES_URL,
-    ALTYN_SELL_FEE_RATE,
     HTTP_TIMEOUT_SECONDS,
     RAPIRA_DEPTH_URL,
     RAPIRA_FEE_URL,
@@ -86,8 +84,24 @@ def _positive_decimal(value: object, service: str, path: str) -> Decimal:
     return parsed
 
 
-def parse_altyn_rates(payload: object) -> ExchangeQuote:
+def _validate_fee_rate(value: Decimal, field: str) -> Decimal:
+    if not isinstance(value, Decimal):
+        raise TypeError(f"{field} must be a Decimal")
+    if not value.is_finite() or value < 0 or value >= 1:
+        raise ValueError(f"{field} must be finite and in [0, 1)")
+    return value
+
+
+def parse_altyn_rates(
+    payload: object,
+    *,
+    buy_fee_rate: Decimal,
+    sell_fee_rate: Decimal,
+) -> ExchangeQuote:
     """Validate Altyn's directional rates and build a USDT/RUB quote."""
+
+    buy_fee_rate = _validate_fee_rate(buy_fee_rate, "buy_fee_rate")
+    sell_fee_rate = _validate_fee_rate(sell_fee_rate, "sell_fee_rate")
 
     rows = _list(payload, _ALTYN, "response")
     wanted = {("USDT", "RUB"), ("RUB", "USDT")}
@@ -138,8 +152,8 @@ def parse_altyn_rates(payload: object) -> ExchangeQuote:
             exchange=Exchange.ALTYN,
             bid=bid,
             ask=ask,
-            buy_fee_rate=ALTYN_BUY_FEE_RATE,
-            sell_fee_rate=ALTYN_SELL_FEE_RATE,
+            buy_fee_rate=buy_fee_rate,
+            sell_fee_rate=sell_fee_rate,
             buy_fee_mode=BuyFeeMode.ADDED_TO_QUOTE,
         )
     except ValueError as exc:
@@ -300,8 +314,22 @@ async def _decode_json_response(response: aiohttp.ClientResponse, service: str) 
 class RateCollector:
     """Fetch and validate one complete Altyn/Rapira market snapshot."""
 
-    def __init__(self, session: aiohttp.ClientSession) -> None:
+    def __init__(
+        self,
+        session: aiohttp.ClientSession,
+        *,
+        altyn_buy_fee_rate: Decimal,
+        altyn_sell_fee_rate: Decimal,
+    ) -> None:
         self._session = session
+        self._altyn_buy_fee_rate = _validate_fee_rate(
+            altyn_buy_fee_rate,
+            "altyn_buy_fee_rate",
+        )
+        self._altyn_sell_fee_rate = _validate_fee_rate(
+            altyn_sell_fee_rate,
+            "altyn_sell_fee_rate",
+        )
         self._timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS)
 
     async def _get_json(self, url: str, service: str, headers: dict[str, str]) -> object:
@@ -340,7 +368,11 @@ class RateCollector:
 
     async def fetch_altyn_quote(self) -> ExchangeQuote:
         payload = await self._get_json(ALTYN_RATES_URL, _ALTYN, _ALTYN_HEADERS)
-        return parse_altyn_rates(payload)
+        return parse_altyn_rates(
+            payload,
+            buy_fee_rate=self._altyn_buy_fee_rate,
+            sell_fee_rate=self._altyn_sell_fee_rate,
+        )
 
     async def fetch_rapira_quote(self) -> ExchangeQuote:
         depth_payload, fee_payload = await asyncio.gather(

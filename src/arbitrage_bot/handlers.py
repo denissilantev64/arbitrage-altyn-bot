@@ -17,10 +17,9 @@ from .errors import InvalidAmountError, RatesUnavailableError
 from .formatting import format_spread_message
 from .keyboards import (
     CALCULATE_BUTTON,
-    FEEDBACK_BUTTON,
-    HELP_BUTTON,
     SHOW_SPREAD_BUTTON,
     SUBSCRIBE_BUTTON,
+    SUPPORT_BUTTON,
     UNSUBSCRIBE_BUTTON,
     main_keyboard,
     support_keyboard,
@@ -28,13 +27,13 @@ from .keyboards import (
 from .repository import SQLiteRepository
 from .texts import (
     AMOUNT_PROMPT,
-    FEEDBACK_TEXT,
     GENERIC_ERROR_TEXT,
     HELP_TEXT,
     INVALID_AMOUNT_TEXT,
     RATES_UNAVAILABLE_TEXT,
     START_TEXT,
     SUBSCRIBED_TEXT,
+    SUPPORT_TEXT,
     UNSUBSCRIBED_TEXT,
 )
 
@@ -89,7 +88,6 @@ def create_router(repository: SQLiteRepository, settings: Settings) -> Router:
         await state.clear()
         subscribed = await ensure_user(message)
         await message.answer(HELP_TEXT, reply_markup=main_keyboard(subscribed))
-        await message.answer(FEEDBACK_TEXT, reply_markup=support_keyboard(settings.support_url))
 
     @router.message(Command("spread"))
     async def spread_handler(
@@ -131,17 +129,11 @@ def create_router(repository: SQLiteRepository, settings: Settings) -> Router:
         await state.clear()
         await set_subscription(message, False)
 
-    @router.message(F.text == HELP_BUTTON)
-    async def help_button_handler(message: Message, state: FSMContext) -> None:
+    @router.message(F.text == SUPPORT_BUTTON)
+    async def support_button_handler(message: Message, state: FSMContext) -> None:
         await state.clear()
         await ensure_user(message)
-        await message.answer(FEEDBACK_TEXT, reply_markup=support_keyboard(settings.support_url))
-
-    @router.message(F.text == FEEDBACK_BUTTON)
-    async def feedback_button_handler(message: Message, state: FSMContext) -> None:
-        await state.clear()
-        await ensure_user(message)
-        await message.answer(FEEDBACK_TEXT, reply_markup=support_keyboard(settings.support_url))
+        await message.answer(SUPPORT_TEXT, reply_markup=support_keyboard(settings.support_url))
 
     @router.message(ProfitInput.waiting_for_amount)
     async def amount_input_handler(message: Message, state: FSMContext) -> None:

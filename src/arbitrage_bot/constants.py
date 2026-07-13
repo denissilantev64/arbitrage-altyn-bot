@@ -7,8 +7,6 @@ RAPIRA_DEPTH_URL = "https://api.rapira.net/market/exchange-plate-mini"
 RAPIRA_FEE_URL = "https://api.rapira.net/market/fee/page-query"
 RAPIRA_SYMBOL = "USDT/RUB"
 
-ALTYN_BUY_FEE_RATE = Decimal("0.015")
-ALTYN_SELL_FEE_RATE = Decimal("0")
 RAPIRA_PUBLIC_FEE_LEVEL = 0
 
 RATE_REFRESH_SECONDS = 60

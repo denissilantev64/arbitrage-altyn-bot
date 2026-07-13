@@ -10,9 +10,7 @@ import aiohttp
 import pytest
 
 from arbitrage_bot.constants import (
-    ALTYN_BUY_FEE_RATE,
     ALTYN_RATES_URL,
-    ALTYN_SELL_FEE_RATE,
     HTTP_TIMEOUT_SECONDS,
     RAPIRA_DEPTH_URL,
     RAPIRA_FEE_URL,
@@ -26,6 +24,9 @@ from arbitrage_bot.rates import (
     parse_rapira_depth,
     parse_rapira_fee,
 )
+
+_BUY_FEE_RATE = Decimal("0.0025")
+_SELL_FEE_RATE = Decimal("0.0004")
 
 
 def altyn_payload() -> list[dict[str, object]]:
@@ -78,22 +79,61 @@ def fee_payload(taker_fee: object = "0.00100000") -> dict[str, object]:
     }
 
 
+def _parse_altyn(payload: object):
+    return parse_altyn_rates(
+        payload,
+        buy_fee_rate=_BUY_FEE_RATE,
+        sell_fee_rate=_SELL_FEE_RATE,
+    )
+
+
 def test_parse_altyn_rates_uses_directional_bid_and_reciprocal_ask() -> None:
-    quote = parse_altyn_rates(altyn_payload())
+    quote = _parse_altyn(altyn_payload())
 
     assert quote.exchange is Exchange.ALTYN
     assert quote.bid == Decimal("77.25")
     assert quote.ask == Decimal(1) / Decimal("0.012429")
-    assert quote.buy_fee_rate == ALTYN_BUY_FEE_RATE
-    assert quote.sell_fee_rate == ALTYN_SELL_FEE_RATE
+    assert quote.buy_fee_rate == _BUY_FEE_RATE
+    assert quote.sell_fee_rate == _SELL_FEE_RATE
     assert quote.buy_fee_mode is BuyFeeMode.ADDED_TO_QUOTE
+
+
+def test_parse_altyn_rates_accepts_explicit_zero_fees() -> None:
+    quote = parse_altyn_rates(
+        altyn_payload(),
+        buy_fee_rate=Decimal("0.00"),
+        sell_fee_rate=Decimal("0.00"),
+    )
+
+    assert quote.buy_fee_rate == 0
+    assert quote.sell_fee_rate == 0
+
+
+@pytest.mark.parametrize(
+    ("buy_fee_rate", "sell_fee_rate"),
+    [
+        (Decimal("-0.001"), Decimal("0")),
+        (Decimal("0"), Decimal("1")),
+        (Decimal("NaN"), Decimal("0")),
+    ],
+)
+def test_parse_altyn_rates_rejects_invalid_explicit_fees(
+    buy_fee_rate: Decimal,
+    sell_fee_rate: Decimal,
+) -> None:
+    with pytest.raises(ValueError):
+        parse_altyn_rates(
+            altyn_payload(),
+            buy_fee_rate=buy_fee_rate,
+            sell_fee_rate=sell_fee_rate,
+        )
 
 
 def test_parse_altyn_rates_allows_unrelated_well_formed_rates() -> None:
     payload = altyn_payload()
     payload.append({"from_currency": "BTC", "to_currency": "RUB", "rate": "1"})
 
-    assert parse_altyn_rates(payload).bid == Decimal("77.25")
+    assert _parse_altyn(payload).bid == Decimal("77.25")
 
 
 @pytest.mark.parametrize(
@@ -113,7 +153,7 @@ def test_parse_altyn_rates_allows_unrelated_well_formed_rates() -> None:
 )
 def test_parse_altyn_rates_rejects_schema_errors(payload: object) -> None:
     with pytest.raises(MarketDataError):
-        parse_altyn_rates(payload)
+        _parse_altyn(payload)
 
 
 def test_parse_altyn_rates_rejects_duplicate_target_direction() -> None:
@@ -121,7 +161,7 @@ def test_parse_altyn_rates_rejects_duplicate_target_direction() -> None:
     payload.append(deepcopy(payload[0]))
 
     with pytest.raises(MarketDataError) as exc_info:
-        parse_altyn_rates(payload)
+        _parse_altyn(payload)
 
     assert exc_info.value.code == "duplicate_rate"
 
@@ -132,7 +172,7 @@ def test_parse_altyn_rates_rejects_missing_direction(missing_index: int) -> None
     del payload[missing_index]
 
     with pytest.raises(MarketDataError) as exc_info:
-        parse_altyn_rates(payload)
+        _parse_altyn(payload)
 
     assert exc_info.value.code == "missing_rate"
 
@@ -144,7 +184,7 @@ def test_parse_altyn_rates_rejects_nonpositive_or_invalid_rates(index: int, rate
     payload[index]["rate"] = rate
 
     with pytest.raises(MarketDataError):
-        parse_altyn_rates(payload)
+        _parse_altyn(payload)
 
 
 def test_parse_altyn_rates_rejects_crossed_market() -> None:
@@ -153,7 +193,7 @@ def test_parse_altyn_rates_rejects_crossed_market() -> None:
     payload[1]["rate"] = "0.0125"  # reciprocal ask is 80
 
     with pytest.raises(MarketDataError) as exc_info:
-        parse_altyn_rates(payload)
+        _parse_altyn(payload)
 
     assert exc_info.value.code == "crossed_market"
 
@@ -439,7 +479,11 @@ class FakeSession:
 
 
 def collector_for(session: FakeSession) -> RateCollector:
-    return RateCollector(cast(aiohttp.ClientSession, session))
+    return RateCollector(
+        cast(aiohttp.ClientSession, session),
+        altyn_buy_fee_rate=_BUY_FEE_RATE,
+        altyn_sell_fee_rate=_SELL_FEE_RATE,
+    )
 
 
 @pytest.mark.asyncio
@@ -459,6 +503,8 @@ async def test_rate_collector_fetches_all_sources_concurrently_with_exact_reques
     snapshot = await asyncio.wait_for(collector_for(session).collect(), timeout=1)
 
     assert snapshot.altyn.exchange is Exchange.ALTYN
+    assert snapshot.altyn.buy_fee_rate == _BUY_FEE_RATE
+    assert snapshot.altyn.sell_fee_rate == _SELL_FEE_RATE
     assert snapshot.rapira.exchange is Exchange.RAPIRA
     assert snapshot.rapira.bid == Decimal("80.01")
     assert snapshot.rapira.ask == Decimal("80.02")

@@ -4,10 +4,9 @@ import pytest
 
 from arbitrage_bot.keyboards import (
     CALCULATE_BUTTON,
-    FEEDBACK_BUTTON,
-    HELP_BUTTON,
     SHOW_SPREAD_BUTTON,
     SUBSCRIBE_BUTTON,
+    SUPPORT_BUTTON,
     UNSUBSCRIBE_BUTTON,
     main_keyboard,
     support_keyboard,
@@ -38,8 +37,7 @@ def test_main_keyboard_has_all_actions_and_dynamic_subscription_button(
         SHOW_SPREAD_BUTTON,
         CALCULATE_BUTTON,
         visible_subscription_button,
-        HELP_BUTTON,
-        FEEDBACK_BUTTON,
+        SUPPORT_BUTTON,
     ]
     assert hidden_subscription_button not in texts
     assert keyboard.resize_keyboard is True
