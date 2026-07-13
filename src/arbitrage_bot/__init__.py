@@ -1,0 +1,1 @@
+"""Altyn/Rapira spread bot."""
