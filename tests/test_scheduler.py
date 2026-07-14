@@ -11,6 +11,13 @@ import pytest
 from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError
 from aiogram.methods import SendMessage
 
+import arbitrage_bot.scheduler as scheduler_module
+from arbitrage_bot.constants import (
+    HTTP_TIMEOUT_SECONDS,
+    MORNING_BROADCAST_RETRY_SECONDS,
+    RATE_MAX_AGE_SECONDS,
+    RATE_REFRESH_SECONDS,
+)
 from arbitrage_bot.domain import BuyFeeMode, Exchange, ExchangeQuote, RateSnapshot
 from arbitrage_bot.errors import MarketDataError, RatesUnavailableError
 from arbitrage_bot.repository import MorningBroadcastBatch
@@ -44,6 +51,62 @@ def _snapshot() -> RateSnapshot:
         ),
         fetched_at=datetime(2026, 7, 13, 5, 59, tzinfo=UTC),
     )
+
+
+def test_runtime_intervals_keep_market_refresh_and_broadcast_retry_independent() -> None:
+    assert RATE_REFRESH_SECONDS == 5 * 60
+    assert RATE_MAX_AGE_SECONDS == 6 * 60
+    assert MORNING_BROADCAST_RETRY_SECONDS == 60
+    assert RATE_MAX_AGE_SECONDS >= RATE_REFRESH_SECONDS + HTTP_TIMEOUT_SECONDS
+
+
+async def test_rate_refresh_loop_waits_five_minutes_between_collections(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    delays: list[float] = []
+
+    async def wait_then_stop(_stop_event: asyncio.Event, delay: float) -> bool:
+        delays.append(delay)
+        return len(delays) == 2
+
+    collect = AsyncMock(return_value=True)
+    monkeypatch.setattr(scheduler_module, "_wait_or_stop", wait_then_stop)
+    monkeypatch.setattr(scheduler_module, "collect_and_store_rates", collect)
+
+    collector = AsyncMock()
+    repository = AsyncMock()
+    await scheduler_module.rate_refresh_loop(collector, repository, asyncio.Event())
+
+    assert delays == [RATE_REFRESH_SECONDS, RATE_REFRESH_SECONDS]
+    collect.assert_awaited_once_with(collector, repository)
+
+
+async def test_morning_broadcast_retry_remains_one_minute(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FixedDatetime:
+        @classmethod
+        def now(cls, _tz: object = None) -> datetime:
+            return datetime(2026, 7, 14, 6, 0, tzinfo=UTC)
+
+    delays: list[float] = []
+
+    async def stop_after_retry(_stop_event: asyncio.Event, delay: float) -> bool:
+        delays.append(delay)
+        return True
+
+    repository = AsyncMock()
+    repository.is_morning_broadcast_complete.return_value = False
+    send = AsyncMock(return_value=False)
+    monkeypatch.setattr(scheduler_module, "datetime", FixedDatetime)
+    monkeypatch.setattr(scheduler_module, "send_morning_broadcast", send)
+    monkeypatch.setattr(scheduler_module, "_wait_or_stop", stop_after_retry)
+
+    bot = AsyncMock()
+    await scheduler_module.morning_broadcast_loop(bot, repository, asyncio.Event())
+
+    assert delays == [MORNING_BROADCAST_RETRY_SECONDS]
+    send.assert_awaited_once_with(bot, repository, date(2026, 7, 14))
 
 
 @pytest.mark.parametrize(

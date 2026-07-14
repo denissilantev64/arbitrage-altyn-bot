@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from arbitrage_bot.constants import RATE_MAX_AGE_SECONDS
 from arbitrage_bot.domain import BuyFeeMode, Exchange, ExchangeQuote, RateSnapshot
 from arbitrage_bot.errors import RatesUnavailableError
 from arbitrage_bot.repository import SQLiteRepository
@@ -77,6 +78,21 @@ async def test_latest_snapshot_rejects_no_data_and_stale_data(
 
     with pytest.raises(RatesUnavailableError, match="stale"):
         await repository.latest_snapshot(max_age_seconds=180, now=now)
+
+
+async def test_product_freshness_window_covers_five_minute_refresh(
+    repository: SQLiteRepository,
+) -> None:
+    now = datetime(2026, 7, 13, 6, 0, tzinfo=UTC)
+    snapshot = make_snapshot(now - timedelta(seconds=RATE_MAX_AGE_SECONDS))
+    await repository.save_snapshot(snapshot)
+
+    assert await repository.latest_snapshot(RATE_MAX_AGE_SECONDS, now=now) == snapshot
+    with pytest.raises(RatesUnavailableError, match="stale"):
+        await repository.latest_snapshot(
+            RATE_MAX_AGE_SECONDS,
+            now=now + timedelta(microseconds=1),
+        )
 
 
 async def test_latest_snapshot_rejects_materially_future_data(

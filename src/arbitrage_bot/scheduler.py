@@ -16,6 +16,7 @@ from aiogram.exceptions import (
 
 from .calculations import calculate_best_spread
 from .constants import (
+    MORNING_BROADCAST_RETRY_SECONDS,
     MORNING_HOUR_MSK,
     MORNING_MINUTE_MSK,
     MOSCOW_UTC_OFFSET_HOURS,
@@ -118,7 +119,7 @@ async def morning_broadcast_loop(
             if not await repository.is_morning_broadcast_complete(run_date):
                 completed = await send_morning_broadcast(bot, repository, run_date)
                 if not completed:
-                    if await _wait_or_stop(stop_event, RATE_REFRESH_SECONDS):
+                    if await _wait_or_stop(stop_event, MORNING_BROADCAST_RETRY_SECONDS):
                         return
                     continue
 
