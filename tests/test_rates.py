@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import asyncio
-from copy import deepcopy
-from datetime import UTC
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import aiohttp
 import pytest
 
+import arbitrage_bot.rates as rates_module
 from arbitrage_bot.constants import (
-    ALTYN_RATES_URL,
+    ALTYN_ARBITRAGE_RATE_URL,
+    ALTYN_REFERENCE_AMOUNT_RUB,
     HTTP_TIMEOUT_SECONDS,
     RAPIRA_DEPTH_URL,
     RAPIRA_FEE_URL,
@@ -20,20 +22,26 @@ from arbitrage_bot.domain import BuyFeeMode, Exchange
 from arbitrage_bot.errors import MarketDataError
 from arbitrage_bot.rates import (
     RateCollector,
-    parse_altyn_rates,
+    parse_altyn_arbitrage_rate,
     parse_rapira_depth,
     parse_rapira_fee,
 )
 
-_BUY_FEE_RATE = Decimal("0.0025")
-_SELL_FEE_RATE = Decimal("0.0004")
+_ALTYN_TOKEN = "a" * 64
+_RECEIVED_AT = datetime(2026, 7, 15, 7, 38, 50, tzinfo=UTC)
 
 
-def altyn_payload() -> list[dict[str, object]]:
-    return [
-        {"from_currency": "USDT", "to_currency": "RUB", "rate": "77.25"},
-        {"from_currency": "RUB", "to_currency": "USDT", "rate": "0.012429"},
-    ]
+def altyn_payload(*, as_of: datetime | None = None) -> dict[str, object]:
+    return {
+        "base_currency": "USDT",
+        "quote_currency": "RUB",
+        "network": "TRC20",
+        "amount_rub": "1000000.00",
+        "rate": "79.88",
+        "network_fee_usdt": "3.00",
+        "indicative": True,
+        "as_of": (as_of or datetime(2026, 7, 15, 7, 38, 45, 559550, tzinfo=UTC)).isoformat(),
+    }
 
 
 def depth_payload() -> dict[str, object]:
@@ -80,122 +88,101 @@ def fee_payload(taker_fee: object = "0.00100000") -> dict[str, object]:
 
 
 def _parse_altyn(payload: object):
-    return parse_altyn_rates(
+    return parse_altyn_arbitrage_rate(
         payload,
-        buy_fee_rate=_BUY_FEE_RATE,
-        sell_fee_rate=_SELL_FEE_RATE,
+        requested_amount_rub=ALTYN_REFERENCE_AMOUNT_RUB,
+        received_at=_RECEIVED_AT,
     )
 
 
-def test_parse_altyn_rates_uses_directional_bid_and_reciprocal_ask() -> None:
+def test_parse_altyn_arbitrage_rate_returns_amount_specific_buy_quote() -> None:
     quote = _parse_altyn(altyn_payload())
 
-    assert quote.exchange is Exchange.ALTYN
-    assert quote.bid == Decimal("77.25")
-    assert quote.ask == Decimal(1) / Decimal("0.012429")
-    assert quote.buy_fee_rate == _BUY_FEE_RATE
-    assert quote.sell_fee_rate == _SELL_FEE_RATE
-    assert quote.buy_fee_mode is BuyFeeMode.ADDED_TO_QUOTE
+    assert quote.amount_rub == Decimal("1000000.00")
+    assert quote.rate == Decimal("79.88")
+    assert quote.network_fee_usdt == Decimal("3.00")
+    assert quote.indicative is True
+    assert quote.as_of == datetime(2026, 7, 15, 7, 38, 45, 559550, tzinfo=UTC)
 
 
-def test_parse_altyn_rates_accepts_explicit_zero_fees() -> None:
-    quote = parse_altyn_rates(
-        altyn_payload(),
-        buy_fee_rate=Decimal("0.00"),
-        sell_fee_rate=Decimal("0.00"),
-    )
+@pytest.mark.parametrize("payload", [None, [], "invalid"])
+def test_parse_altyn_arbitrage_rate_requires_object_root(payload: object) -> None:
+    with pytest.raises(MarketDataError) as exc_info:
+        _parse_altyn(payload)
 
-    assert quote.buy_fee_rate == 0
-    assert quote.sell_fee_rate == 0
+    assert exc_info.value.code == "invalid_schema"
 
 
 @pytest.mark.parametrize(
-    ("buy_fee_rate", "sell_fee_rate"),
+    ("field", "value", "expected_code"),
     [
-        (Decimal("-0.001"), Decimal("0")),
-        (Decimal("0"), Decimal("1")),
-        (Decimal("NaN"), Decimal("0")),
+        ("base_currency", "BTC", "invalid_market"),
+        ("quote_currency", "USD", "invalid_market"),
+        ("network", "ERC20", "invalid_market"),
+        ("amount_rub", "999999.99", "amount_mismatch"),
+        ("amount_rub", "0", "invalid_value"),
+        ("rate", "0", "invalid_value"),
+        ("rate", "NaN", "invalid_value"),
+        ("network_fee_usdt", "-0.01", "invalid_value"),
+        ("network_fee_usdt", "Infinity", "invalid_value"),
+        ("indicative", 1, "invalid_schema"),
+        ("as_of", "not-a-date", "invalid_value"),
+        ("as_of", "2026-07-15T07:38:45", "invalid_value"),
     ],
 )
-def test_parse_altyn_rates_rejects_invalid_explicit_fees(
-    buy_fee_rate: Decimal,
-    sell_fee_rate: Decimal,
+def test_parse_altyn_arbitrage_rate_rejects_invalid_fields(
+    field: str,
+    value: object,
+    expected_code: str,
 ) -> None:
-    with pytest.raises(ValueError):
-        parse_altyn_rates(
-            altyn_payload(),
-            buy_fee_rate=buy_fee_rate,
-            sell_fee_rate=sell_fee_rate,
-        )
-
-
-def test_parse_altyn_rates_allows_unrelated_well_formed_rates() -> None:
     payload = altyn_payload()
-    payload.append({"from_currency": "BTC", "to_currency": "RUB", "rate": "1"})
-
-    assert _parse_altyn(payload).bid == Decimal("77.25")
-
-
-@pytest.mark.parametrize(
-    "payload",
-    [
-        None,
-        {},
-        [None],
-        [{"from_currency": "USDT", "to_currency": "RUB", "rate": "77.25"}, None],
-        [{"to_currency": "RUB", "rate": "77.25"}],
-        [{"from_currency": "USDT", "rate": "77.25"}],
-        [{"from_currency": "USDT", "to_currency": "RUB"}],
-        [{"from_currency": 1, "to_currency": "RUB", "rate": "77.25"}],
-        [{"from_currency": "USDT", "to_currency": "RUB", "rate": "not-a-rate"}],
-        [{"from_currency": "USDT", "to_currency": "RUB", "rate": "NaN"}],
-    ],
-)
-def test_parse_altyn_rates_rejects_schema_errors(payload: object) -> None:
-    with pytest.raises(MarketDataError):
-        _parse_altyn(payload)
-
-
-def test_parse_altyn_rates_rejects_duplicate_target_direction() -> None:
-    payload = altyn_payload()
-    payload.append(deepcopy(payload[0]))
+    payload[field] = value
 
     with pytest.raises(MarketDataError) as exc_info:
         _parse_altyn(payload)
 
-    assert exc_info.value.code == "duplicate_rate"
+    assert exc_info.value.code == expected_code
 
 
-@pytest.mark.parametrize("missing_index", [0, 1])
-def test_parse_altyn_rates_rejects_missing_direction(missing_index: int) -> None:
+@pytest.mark.parametrize("field", list(altyn_payload()))
+def test_parse_altyn_arbitrage_rate_requires_every_field(field: str) -> None:
     payload = altyn_payload()
-    del payload[missing_index]
+    del payload[field]
 
     with pytest.raises(MarketDataError) as exc_info:
         _parse_altyn(payload)
 
-    assert exc_info.value.code == "missing_rate"
+    assert exc_info.value.code == "invalid_schema"
 
 
-@pytest.mark.parametrize("index", [0, 1])
-@pytest.mark.parametrize("rate", ["0", "-0.01", float("inf"), True])
-def test_parse_altyn_rates_rejects_nonpositive_or_invalid_rates(index: int, rate: object) -> None:
+@pytest.mark.parametrize("field", ["amount_rub", "rate", "network_fee_usdt"])
+@pytest.mark.parametrize("value", [1, 1.0, True, "", " 1", "1 "])
+def test_parse_altyn_arbitrage_rate_requires_decimal_strings(
+    field: str,
+    value: object,
+) -> None:
     payload = altyn_payload()
-    payload[index]["rate"] = rate
+    payload[field] = value
 
     with pytest.raises(MarketDataError):
         _parse_altyn(payload)
 
 
-def test_parse_altyn_rates_rejects_crossed_market() -> None:
+def test_parse_altyn_arbitrage_rate_enforces_source_time_boundaries() -> None:
     payload = altyn_payload()
-    payload[0]["rate"] = "81"
-    payload[1]["rate"] = "0.0125"  # reciprocal ask is 80
+    payload["as_of"] = (_RECEIVED_AT - timedelta(seconds=60)).isoformat()
+    assert _parse_altyn(payload).as_of == _RECEIVED_AT - timedelta(seconds=60)
 
-    with pytest.raises(MarketDataError) as exc_info:
+    payload["as_of"] = (_RECEIVED_AT - timedelta(seconds=60, microseconds=1)).isoformat()
+    with pytest.raises(MarketDataError, match="stale_rate"):
         _parse_altyn(payload)
 
-    assert exc_info.value.code == "crossed_market"
+    payload["as_of"] = (_RECEIVED_AT + timedelta(seconds=5)).isoformat()
+    assert _parse_altyn(payload).as_of == _RECEIVED_AT + timedelta(seconds=5)
+
+    payload["as_of"] = (_RECEIVED_AT + timedelta(seconds=5, microseconds=1)).isoformat()
+    with pytest.raises(MarketDataError, match="future_rate"):
+        _parse_altyn(payload)
 
 
 def test_parse_rapira_depth_uses_best_item_prices() -> None:
@@ -481,19 +468,18 @@ class FakeSession:
 def collector_for(session: FakeSession) -> RateCollector:
     return RateCollector(
         cast(aiohttp.ClientSession, session),
-        altyn_buy_fee_rate=_BUY_FEE_RATE,
-        altyn_sell_fee_rate=_SELL_FEE_RATE,
+        altyn_arbitrage_token=_ALTYN_TOKEN,
     )
 
 
 @pytest.mark.asyncio
 async def test_rate_collector_fetches_all_sources_concurrently_with_exact_requests() -> None:
-    altyn_response = FakeResponse(altyn_payload())
+    altyn_response = FakeResponse(altyn_payload(as_of=datetime.now(UTC)))
     depth_response = FakeResponse(depth_payload())
     fee_response = FakeResponse(fee_payload())
     session = FakeSession(
         {
-            ("GET", ALTYN_RATES_URL): altyn_response,
+            ("GET", ALTYN_ARBITRAGE_RATE_URL): altyn_response,
             ("POST", RAPIRA_DEPTH_URL): depth_response,
             ("POST", RAPIRA_FEE_URL): fee_response,
         },
@@ -502,9 +488,9 @@ async def test_rate_collector_fetches_all_sources_concurrently_with_exact_reques
 
     snapshot = await asyncio.wait_for(collector_for(session).collect(), timeout=1)
 
-    assert snapshot.altyn.exchange is Exchange.ALTYN
-    assert snapshot.altyn.buy_fee_rate == _BUY_FEE_RATE
-    assert snapshot.altyn.sell_fee_rate == _SELL_FEE_RATE
+    assert snapshot.altyn.amount_rub == ALTYN_REFERENCE_AMOUNT_RUB
+    assert snapshot.altyn.rate == Decimal("79.88")
+    assert snapshot.altyn.network_fee_usdt == Decimal("3.00")
     assert snapshot.rapira.exchange is Exchange.RAPIRA
     assert snapshot.rapira.bid == Decimal("80.01")
     assert snapshot.rapira.ask == Decimal("80.02")
@@ -512,6 +498,7 @@ async def test_rate_collector_fetches_all_sources_concurrently_with_exact_reques
     assert snapshot.rapira.sell_fee_rate == Decimal("0.001")
     assert snapshot.rapira.buy_fee_mode is BuyFeeMode.DEDUCTED_FROM_BASE
     assert snapshot.fetched_at.tzinfo is UTC
+    assert snapshot.fetched_at <= snapshot.altyn.as_of
 
     calls = {(method, url): kwargs for method, url, kwargs in session.calls}
     assert calls[("POST", RAPIRA_DEPTH_URL)]["data"] == {"symbol": RAPIRA_SYMBOL}
@@ -524,10 +511,13 @@ async def test_rate_collector_fetches_all_sources_concurrently_with_exact_reques
         "Accept": "application/json",
         "Content-Type": "application/x-www-form-urlencoded",
     }
-    assert calls[("GET", ALTYN_RATES_URL)]["headers"] == {
+    assert calls[("GET", ALTYN_ARBITRAGE_RATE_URL)]["headers"] == {
         "Accept": "application/json",
-        "Referer": "https://altyn.one/",
+        "X-Arbitrage-Token": _ALTYN_TOKEN,
     }
+    assert calls[("GET", ALTYN_ARBITRAGE_RATE_URL)]["params"] == {"amount_rub": "1000000.00"}
+    assert calls[("GET", ALTYN_ARBITRAGE_RATE_URL)]["allow_redirects"] is False
+    assert _ALTYN_TOKEN not in ALTYN_ARBITRAGE_RATE_URL
     for kwargs in calls.values():
         timeout = cast(aiohttp.ClientTimeout, kwargs["timeout"])
         assert timeout.total == HTTP_TIMEOUT_SECONDS
@@ -549,10 +539,10 @@ async def test_rate_collector_rejects_bad_http_response(
     response: FakeResponse,
     expected_code: str,
 ) -> None:
-    session = FakeSession({("GET", ALTYN_RATES_URL): response})
+    session = FakeSession({("GET", ALTYN_ARBITRAGE_RATE_URL): response})
 
     with pytest.raises(MarketDataError) as exc_info:
-        await collector_for(session).fetch_altyn_quote()
+        await collector_for(session).fetch_altyn_quote(ALTYN_REFERENCE_AMOUNT_RUB)
 
     assert exc_info.value.service == "altyn"
     assert exc_info.value.code == expected_code
@@ -561,11 +551,67 @@ async def test_rate_collector_rejects_bad_http_response(
 
 @pytest.mark.asyncio
 async def test_rate_collector_wraps_transport_error_without_retry() -> None:
-    session = FakeSession({("GET", ALTYN_RATES_URL): aiohttp.ClientConnectionError("network down")})
+    session = FakeSession(
+        {("GET", ALTYN_ARBITRAGE_RATE_URL): aiohttp.ClientConnectionError("network down")}
+    )
 
     with pytest.raises(MarketDataError) as exc_info:
-        await collector_for(session).fetch_altyn_quote()
+        await collector_for(session).fetch_altyn_quote(ALTYN_REFERENCE_AMOUNT_RUB)
 
     assert exc_info.value.service == "altyn"
     assert exc_info.value.code == "request_failed"
     assert len(session.calls) == 1
+    assert _ALTYN_TOKEN not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_rate_collector_caches_same_amount_for_provider_cache_window() -> None:
+    response = FakeResponse(altyn_payload(as_of=datetime.now(UTC)))
+    session = FakeSession({("GET", ALTYN_ARBITRAGE_RATE_URL): response})
+    collector = collector_for(session)
+
+    first = await collector.fetch_altyn_quote(ALTYN_REFERENCE_AMOUNT_RUB)
+    second = await collector.fetch_altyn_quote(Decimal("1000000"))
+
+    assert second is first
+    assert len(session.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_rate_collector_limits_uncached_altyn_requests_without_retry() -> None:
+    response = FakeResponse(altyn_payload(as_of=datetime.now(UTC)))
+    session = FakeSession({("GET", ALTYN_ARBITRAGE_RATE_URL): response})
+    collector = collector_for(session)
+    await collector.fetch_altyn_quote(ALTYN_REFERENCE_AMOUNT_RUB)
+
+    with pytest.raises(MarketDataError) as exc_info:
+        await collector.fetch_altyn_quote(Decimal("2000000"))
+
+    assert exc_info.value.code == "client_rate_limit"
+    assert len(session.calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_scheduled_altyn_request_waits_for_local_rate_limit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_payload = altyn_payload(as_of=datetime.now(UTC))
+    first_payload["amount_rub"] = "2000000.00"
+    route = ("GET", ALTYN_ARBITRAGE_RATE_URL)
+    session = FakeSession({route: FakeResponse(first_payload)})
+    collector = collector_for(session)
+    await collector.fetch_altyn_quote(Decimal("2000000"))
+
+    session.routes[route] = FakeResponse(altyn_payload(as_of=datetime.now(UTC)))
+    sleep = AsyncMock()
+    monkeypatch.setattr(rates_module.asyncio, "sleep", sleep)
+    quote = await collector.fetch_altyn_quote(
+        ALTYN_REFERENCE_AMOUNT_RUB,
+        wait_for_slot=True,
+    )
+
+    assert quote.amount_rub == ALTYN_REFERENCE_AMOUNT_RUB
+    sleep.assert_awaited_once()
+    delay = sleep.await_args.args[0]
+    assert 0 < delay <= 10
+    assert len(session.calls) == 2

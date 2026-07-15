@@ -1,35 +1,41 @@
 from __future__ import annotations
 
 import asyncio
+import re
+import time
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Final, cast
 
 import aiohttp
 
+from .amounts import validate_amount_rub
 from .constants import (
-    ALTYN_RATES_URL,
+    ALTYN_ARBITRAGE_RATE_URL,
+    ALTYN_MIN_REQUEST_INTERVAL_SECONDS,
+    ALTYN_QUOTE_CACHE_SECONDS,
+    ALTYN_REFERENCE_AMOUNT_RUB,
+    ALTYN_SOURCE_MAX_AGE_SECONDS,
+    ALTYN_SOURCE_MAX_FUTURE_SKEW_SECONDS,
     HTTP_TIMEOUT_SECONDS,
     RAPIRA_DEPTH_URL,
     RAPIRA_FEE_URL,
     RAPIRA_PUBLIC_FEE_LEVEL,
     RAPIRA_SYMBOL,
 )
-from .domain import BuyFeeMode, Exchange, ExchangeQuote, RateSnapshot
+from .domain import AltynBuyQuote, BuyFeeMode, Exchange, ExchangeQuote, RateSnapshot
 from .errors import MarketDataError
 
 _ALTYN: Final = "altyn"
 _RAPIRA: Final = "rapira"
 _MISSING: Final = object()
 
-_ALTYN_HEADERS: Final = {
-    "Accept": "application/json",
-    "Referer": "https://altyn.one/",
-}
 _RAPIRA_HEADERS: Final = {
     "Accept": "application/json",
     "Content-Type": "application/x-www-form-urlencoded",
 }
+_ALTYN_TOKEN_PATTERN: Final = re.compile(r"[0-9a-f]{64}\Z", flags=re.ASCII)
+_RUB_QUANTUM: Final = Decimal("0.01")
 
 
 def _error(service: str, code: str, detail: str) -> MarketDataError:
@@ -84,79 +90,118 @@ def _positive_decimal(value: object, service: str, path: str) -> Decimal:
     return parsed
 
 
-def _validate_fee_rate(value: Decimal, field: str) -> Decimal:
-    if not isinstance(value, Decimal):
-        raise TypeError(f"{field} must be a Decimal")
-    if not value.is_finite() or value < 0 or value >= 1:
-        raise ValueError(f"{field} must be finite and in [0, 1)")
-    return value
+def _decimal_string(value: object, service: str, path: str) -> Decimal:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise _error(service, "invalid_schema", f"{path} must be a decimal string")
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation as exc:
+        raise _error(service, "invalid_value", f"{path} must be a decimal number") from exc
+    if not parsed.is_finite():
+        raise _error(service, "invalid_value", f"{path} must be finite")
+    return parsed
 
 
-def parse_altyn_rates(
+def _aware_datetime(value: object, service: str, path: str) -> datetime:
+    text = _string(value, service, path)
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError as exc:
+        raise _error(service, "invalid_value", f"{path} must be an ISO datetime") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise _error(service, "invalid_value", f"{path} must be timezone-aware")
+    return parsed.astimezone(UTC)
+
+
+def _canonical_amount_rub(amount_rub: Decimal) -> tuple[Decimal, str]:
+    if not isinstance(amount_rub, Decimal):
+        raise TypeError("amount_rub must be a Decimal")
+    validated = validate_amount_rub(amount_rub)
+    try:
+        quantized = validated.quantize(_RUB_QUANTUM)
+    except InvalidOperation as exc:
+        raise ValueError("amount_rub must have at most two decimal places") from exc
+    if quantized != validated:
+        raise ValueError("amount_rub must have at most two decimal places")
+    return quantized, format(quantized, ".2f")
+
+
+def parse_altyn_arbitrage_rate(
     payload: object,
     *,
-    buy_fee_rate: Decimal,
-    sell_fee_rate: Decimal,
-) -> ExchangeQuote:
-    """Validate Altyn's directional rates and build a USDT/RUB quote."""
+    requested_amount_rub: Decimal,
+    received_at: datetime,
+) -> AltynBuyQuote:
+    """Validate one amount-specific, all-in Altyn purchase quote."""
 
-    buy_fee_rate = _validate_fee_rate(buy_fee_rate, "buy_fee_rate")
-    sell_fee_rate = _validate_fee_rate(sell_fee_rate, "sell_fee_rate")
+    if not isinstance(received_at, datetime):
+        raise TypeError("received_at must be a datetime")
+    if received_at.tzinfo is None or received_at.utcoffset() is None:
+        raise ValueError("received_at must be timezone-aware")
+    requested_amount, _ = _canonical_amount_rub(requested_amount_rub)
+    root = _mapping(payload, _ALTYN, "response")
 
-    rows = _list(payload, _ALTYN, "response")
-    wanted = {("USDT", "RUB"), ("RUB", "USDT")}
-    found: dict[tuple[str, str], Decimal] = {}
+    identities = {
+        "base_currency": "USDT",
+        "quote_currency": "RUB",
+        "network": "TRC20",
+    }
+    for field, expected in identities.items():
+        value = _string(_required(root, field, _ALTYN, "response"), _ALTYN, field)
+        if value != expected:
+            raise _error(_ALTYN, "invalid_market", f"{field} must equal {expected!r}")
 
-    for index, raw_row in enumerate(rows):
-        path = f"response[{index}]"
-        row = _mapping(raw_row, _ALTYN, path)
-        from_currency = _string(
-            _required(row, "from_currency", _ALTYN, path),
-            _ALTYN,
-            f"{path}.from_currency",
-        )
-        to_currency = _string(
-            _required(row, "to_currency", _ALTYN, path),
-            _ALTYN,
-            f"{path}.to_currency",
-        )
-        rate = _positive_decimal(
-            _required(row, "rate", _ALTYN, path),
-            _ALTYN,
-            f"{path}.rate",
-        )
+    amount_rub = _decimal_string(
+        _required(root, "amount_rub", _ALTYN, "response"),
+        _ALTYN,
+        "amount_rub",
+    )
+    if amount_rub <= 0:
+        raise _error(_ALTYN, "invalid_value", "amount_rub must be positive")
+    if amount_rub != requested_amount:
+        raise _error(_ALTYN, "amount_mismatch", "response amount does not match the request")
 
-        direction = (from_currency, to_currency)
-        if direction not in wanted:
-            continue
-        if direction in found:
-            raise _error(
-                _ALTYN,
-                "duplicate_rate",
-                f"duplicate {from_currency}->{to_currency} rate",
-            )
-        found[direction] = rate
+    rate = _decimal_string(
+        _required(root, "rate", _ALTYN, "response"),
+        _ALTYN,
+        "rate",
+    )
+    if rate <= 0:
+        raise _error(_ALTYN, "invalid_value", "rate must be positive")
 
-    missing = wanted.difference(found)
-    if missing:
-        directions = ", ".join(f"{source}->{target}" for source, target in sorted(missing))
-        raise _error(_ALTYN, "missing_rate", f"missing rate: {directions}")
+    network_fee_usdt = _decimal_string(
+        _required(root, "network_fee_usdt", _ALTYN, "response"),
+        _ALTYN,
+        "network_fee_usdt",
+    )
+    if network_fee_usdt < 0:
+        raise _error(_ALTYN, "invalid_value", "network_fee_usdt must be non-negative")
 
-    bid = found[("USDT", "RUB")]
-    ask = Decimal(1) / found[("RUB", "USDT")]
-    if bid > ask:
-        raise _error(_ALTYN, "crossed_market", "USDT/RUB bid exceeds ask")
+    indicative = _required(root, "indicative", _ALTYN, "response")
+    if not isinstance(indicative, bool):
+        raise _error(_ALTYN, "invalid_schema", "indicative must be a boolean")
+
+    as_of = _aware_datetime(
+        _required(root, "as_of", _ALTYN, "response"),
+        _ALTYN,
+        "as_of",
+    )
+    received_utc = received_at.astimezone(UTC)
+    age_seconds = Decimal(str((received_utc - as_of).total_seconds()))
+    if age_seconds > ALTYN_SOURCE_MAX_AGE_SECONDS:
+        raise _error(_ALTYN, "stale_rate", "Altyn rate is stale")
+    if age_seconds < -ALTYN_SOURCE_MAX_FUTURE_SKEW_SECONDS:
+        raise _error(_ALTYN, "future_rate", "Altyn rate is dated in the future")
 
     try:
-        return ExchangeQuote(
-            exchange=Exchange.ALTYN,
-            bid=bid,
-            ask=ask,
-            buy_fee_rate=buy_fee_rate,
-            sell_fee_rate=sell_fee_rate,
-            buy_fee_mode=BuyFeeMode.ADDED_TO_QUOTE,
+        return AltynBuyQuote(
+            amount_rub=amount_rub,
+            rate=rate,
+            network_fee_usdt=network_fee_usdt,
+            indicative=indicative,
+            as_of=as_of,
         )
-    except ValueError as exc:
+    except (TypeError, ValueError) as exc:
         raise _error(_ALTYN, "invalid_quote", str(exc)) from exc
 
 
@@ -318,23 +363,35 @@ class RateCollector:
         self,
         session: aiohttp.ClientSession,
         *,
-        altyn_buy_fee_rate: Decimal,
-        altyn_sell_fee_rate: Decimal,
+        altyn_arbitrage_token: str,
     ) -> None:
+        if not isinstance(altyn_arbitrage_token, str) or not _ALTYN_TOKEN_PATTERN.fullmatch(
+            altyn_arbitrage_token
+        ):
+            raise ValueError("altyn_arbitrage_token must be 64 lowercase hexadecimal characters")
         self._session = session
-        self._altyn_buy_fee_rate = _validate_fee_rate(
-            altyn_buy_fee_rate,
-            "altyn_buy_fee_rate",
-        )
-        self._altyn_sell_fee_rate = _validate_fee_rate(
-            altyn_sell_fee_rate,
-            "altyn_sell_fee_rate",
-        )
+        self._altyn_arbitrage_token = altyn_arbitrage_token
+        self._altyn_cache: dict[Decimal, tuple[float, AltynBuyQuote]] = {}
+        self._altyn_lock = asyncio.Lock()
+        self._last_altyn_request_started: float | None = None
         self._timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS)
 
-    async def _get_json(self, url: str, service: str, headers: dict[str, str]) -> object:
+    async def _get_json(
+        self,
+        url: str,
+        service: str,
+        headers: dict[str, str],
+        *,
+        params: dict[str, str] | None = None,
+    ) -> object:
         try:
-            response = await self._session.get(url, headers=headers, timeout=self._timeout)
+            response = await self._session.get(
+                url,
+                allow_redirects=False,
+                headers=headers,
+                params=params,
+                timeout=self._timeout,
+            )
         except (aiohttp.ClientError, TimeoutError) as exc:
             detail = f"request failed: {type(exc).__name__}"
             raise _error(service, "request_failed", detail) from exc
@@ -366,13 +423,60 @@ class RateCollector:
         finally:
             response.release()
 
-    async def fetch_altyn_quote(self) -> ExchangeQuote:
-        payload = await self._get_json(ALTYN_RATES_URL, _ALTYN, _ALTYN_HEADERS)
-        return parse_altyn_rates(
-            payload,
-            buy_fee_rate=self._altyn_buy_fee_rate,
-            sell_fee_rate=self._altyn_sell_fee_rate,
-        )
+    async def fetch_altyn_quote(
+        self,
+        amount_rub: Decimal,
+        *,
+        wait_for_slot: bool = False,
+    ) -> AltynBuyQuote:
+        amount, amount_query = _canonical_amount_rub(amount_rub)
+        async with self._altyn_lock:
+            now = time.monotonic()
+            self._altyn_cache = {
+                cached_amount: cached
+                for cached_amount, cached in self._altyn_cache.items()
+                if cached[0] > now
+            }
+            cached = self._altyn_cache.get(amount)
+            if cached is not None:
+                return cached[1]
+
+            if self._last_altyn_request_started is not None:
+                delay = self._last_altyn_request_started + ALTYN_MIN_REQUEST_INTERVAL_SECONDS - now
+                if delay > 0:
+                    if not wait_for_slot:
+                        raise _error(
+                            _ALTYN,
+                            "client_rate_limit",
+                            "Altyn request is locally rate-limited",
+                        )
+                    await asyncio.sleep(delay)
+
+            self._last_altyn_request_started = time.monotonic()
+
+            payload = await self._get_json(
+                ALTYN_ARBITRAGE_RATE_URL,
+                _ALTYN,
+                {
+                    "Accept": "application/json",
+                    "X-Arbitrage-Token": self._altyn_arbitrage_token,
+                },
+                params={"amount_rub": amount_query},
+            )
+            quote = parse_altyn_arbitrage_rate(
+                payload,
+                requested_amount_rub=amount,
+                received_at=datetime.now(UTC),
+            )
+            source_freshness_left = (
+                ALTYN_SOURCE_MAX_AGE_SECONDS - (datetime.now(UTC) - quote.as_of).total_seconds()
+            )
+            cache_seconds = min(ALTYN_QUOTE_CACHE_SECONDS, max(0.0, source_freshness_left))
+            self._altyn_cache[amount] = (
+                time.monotonic() + cache_seconds,
+                quote,
+            )
+            return quote
 
     async def fetch_rapira_quote(self) -> ExchangeQuote:
         depth_payload, fee_payload = await asyncio.gather(
@@ -407,8 +511,13 @@ class RateCollector:
             raise _error(_RAPIRA, "invalid_quote", str(exc)) from exc
 
     async def collect(self) -> RateSnapshot:
+        collection_started_at = datetime.now(UTC)
         altyn, rapira = await asyncio.gather(
-            self.fetch_altyn_quote(),
+            self.fetch_altyn_quote(ALTYN_REFERENCE_AMOUNT_RUB, wait_for_slot=True),
             self.fetch_rapira_quote(),
         )
-        return RateSnapshot(altyn=altyn, rapira=rapira, fetched_at=datetime.now(UTC))
+        return RateSnapshot(
+            altyn=altyn,
+            rapira=rapira,
+            fetched_at=min(altyn.as_of, collection_started_at),
+        )

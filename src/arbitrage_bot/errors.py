@@ -24,3 +24,7 @@ class RatesUnavailableError(ArbitrageBotError):
 
 class InvalidAmountError(ArbitrageBotError):
     """A requested RUB amount has an invalid format or range."""
+
+
+class InsufficientAmountError(ArbitrageBotError):
+    """A RUB amount cannot cover the fixed network fee."""

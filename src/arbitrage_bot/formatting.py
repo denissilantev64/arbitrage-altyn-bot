@@ -44,7 +44,7 @@ def format_spread_message(
     amount: AmountResult | None = None,
 ) -> str:
     lines = [
-        (f"<b>{spread.buy_exchange.value} → {spread.sell_exchange.value} | USDT/RUB</b>"),
+        "<b>Altyn → Rapira | USDT/RUB</b>",
         "",
         (
             "<b>Спред без комиссии: "
@@ -53,20 +53,16 @@ def format_spread_message(
             f"{_format_fixed(spread.gross_spread_percent, 2, show_positive_sign=True)}%)</b>"
         ),
         (
-            f"Покупка на {spread.buy_exchange.value}: {_format_fixed(spread.raw_buy, 2)}"
-            f" | Продажа на {spread.sell_exchange.value}: {_format_fixed(spread.raw_sell, 2)}"
+            f"Покупка на Altyn: {_format_fixed(spread.altyn_rate, 2)}"
+            f" | Продажа на Rapira: {_format_fixed(spread.rapira_bid, 2)}"
         ),
+        "Комиссия Altyn включена в курс",
     ]
 
-    if spread.buy_fee_rate != 0:
+    if spread.rapira_sell_fee_rate != 0:
         lines.append(
-            f"Комиссия за покупку USDT на {spread.buy_exchange.value} "
-            f"{_format_fee_percent(spread.buy_fee_rate)}%"
-        )
-    if spread.sell_fee_rate != 0:
-        lines.append(
-            f"Комиссия за продажу USDT на {spread.sell_exchange.value} "
-            f"{_format_fee_percent(spread.sell_fee_rate)}%"
+            "Комиссия за продажу USDT на Rapira "
+            f"{_format_fee_percent(spread.rapira_sell_fee_rate)}%"
         )
 
     lines.append(
@@ -80,13 +76,14 @@ def format_spread_message(
             [
                 "",
                 f"<b>Расчет на {_format_budget(amount.amount_rub)} RUB</b>",
+                f"Сетевая комиссия: {_format_fixed(amount.network_fee_usdt, 2)} USDT",
                 f"USDT к продаже: {_format_fixed(amount.usdt_to_sell, 2)}",
                 (
                     "Прибыль с учетом комиссии: "
                     f"{_format_fixed(amount.profit_rub, 2, show_positive_sign=True)} RUB ("
                     f"{_format_fixed(amount.profit_percent, 2, show_positive_sign=True)}%)"
                 ),
-                "Расчет индикативный и не учитывает глубину стакана и переводы.",
+                "Расчет индикативный и не учитывает глубину стакана.",
             ]
         )
 

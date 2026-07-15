@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import asyncio
-from decimal import Decimal
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from aiogram.fsm.storage.base import BaseEventIsolation
@@ -52,19 +52,18 @@ def test_dispatcher_uses_event_isolation() -> None:
     repository = SQLiteRepository(":memory:")
     settings = Settings(
         telegram_bot_token="123456789:test-token",
+        altyn_arbitrage_token="a" * 64,
         database_path=Path(":memory:"),
         support_url="https://t.me/vardumyans",
-        altyn_buy_fee_rate=Decimal("0"),
-        altyn_sell_fee_rate=Decimal("0"),
     )
 
-    dispatcher = build_dispatcher(repository, settings)
+    dispatcher = build_dispatcher(repository, settings, AsyncMock())
 
     isolation: BaseEventIsolation = dispatcher.fsm.events_isolation
     assert isinstance(isolation, SimpleEventIsolation)
 
 
-async def test_run_passes_altyn_fee_rates_to_collector(
+async def test_run_passes_altyn_token_to_collector(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -103,13 +102,11 @@ async def test_run_passes_altyn_fee_rates_to_collector(
             self,
             received_session: object,
             *,
-            altyn_buy_fee_rate: Decimal,
-            altyn_sell_fee_rate: Decimal,
+            altyn_arbitrage_token: str,
         ) -> None:
             captured.update(
                 session=received_session,
-                buy=altyn_buy_fee_rate,
-                sell=altyn_sell_fee_rate,
+                token=altyn_arbitrage_token,
             )
 
     async def stop_after_collector_creation(*args: object) -> None:
@@ -122,10 +119,9 @@ async def test_run_passes_altyn_fee_rates_to_collector(
 
     settings = Settings(
         telegram_bot_token="123456789:test-token",
+        altyn_arbitrage_token="a" * 64,
         database_path=tmp_path / "bot.sqlite3",
         support_url="https://t.me/vardumyans",
-        altyn_buy_fee_rate=Decimal("0.0025"),
-        altyn_sell_fee_rate=Decimal("0.0004"),
     )
 
     with pytest.raises(ExpectedStop):
@@ -133,6 +129,5 @@ async def test_run_passes_altyn_fee_rates_to_collector(
 
     assert captured == {
         "session": session,
-        "buy": Decimal("0.0025"),
-        "sell": Decimal("0.0004"),
+        "token": "a" * 64,
     }

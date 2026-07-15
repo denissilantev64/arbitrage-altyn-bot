@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+from decimal import Decimal
+from typing import Protocol
 
 from aiogram import F, Router
 from aiogram.enums import ChatType
@@ -10,10 +12,16 @@ from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import ErrorEvent, Message
 
 from .amounts import parse_amount_rub
-from .calculations import calculate_amount, calculate_best_spread
+from .calculations import calculate_amount, calculate_spread
 from .config import Settings
 from .constants import RATE_MAX_AGE_SECONDS
-from .errors import InvalidAmountError, RatesUnavailableError
+from .domain import AltynBuyQuote, RateSnapshot
+from .errors import (
+    InsufficientAmountError,
+    InvalidAmountError,
+    MarketDataError,
+    RatesUnavailableError,
+)
 from .formatting import format_spread_message
 from .keyboards import (
     CALCULATE_BUTTON,
@@ -27,6 +35,7 @@ from .keyboards import (
 from .repository import SQLiteRepository
 from .texts import (
     AMOUNT_PROMPT,
+    AMOUNT_TOO_SMALL_TEXT,
     GENERIC_ERROR_TEXT,
     HELP_TEXT,
     INVALID_AMOUNT_TEXT,
@@ -34,17 +43,26 @@ from .texts import (
     START_TEXT,
     SUBSCRIBED_TEXT,
     SUPPORT_TEXT,
+    TOO_MANY_REQUESTS_TEXT,
     UNSUBSCRIBED_TEXT,
 )
 
 logger = logging.getLogger(__name__)
 
 
+class AltynQuoteProvider(Protocol):
+    async def fetch_altyn_quote(self, amount_rub: Decimal) -> AltynBuyQuote: ...
+
+
 class ProfitInput(StatesGroup):
     waiting_for_amount = State()
 
 
-def create_router(repository: SQLiteRepository, settings: Settings) -> Router:
+def create_router(
+    repository: SQLiteRepository,
+    settings: Settings,
+    quote_provider: AltynQuoteProvider,
+) -> Router:
     router = Router(name="telegram-handlers")
     router.message.filter(F.chat.type == ChatType.PRIVATE)
 
@@ -54,14 +72,38 @@ def create_router(repository: SQLiteRepository, settings: Settings) -> Router:
     async def send_spread(message: Message, raw_amount: str | None = None) -> None:
         subscribed = await ensure_user(message)
         try:
-            snapshot = await repository.latest_snapshot(RATE_MAX_AGE_SECONDS)
-            spread = calculate_best_spread(snapshot)
+            amount_rub = parse_amount_rub(raw_amount) if raw_amount is not None else None
+            stored_snapshot = await repository.latest_snapshot(RATE_MAX_AGE_SECONDS)
+            snapshot = stored_snapshot
             amount = None
-            if raw_amount is not None:
-                amount_rub = parse_amount_rub(raw_amount)
-                amount = calculate_amount(spread, amount_rub)
+            if amount_rub is not None:
+                exact_altyn_quote = await quote_provider.fetch_altyn_quote(amount_rub)
+                stored_snapshot = await repository.latest_snapshot(RATE_MAX_AGE_SECONDS)
+                snapshot = RateSnapshot(
+                    altyn=exact_altyn_quote,
+                    rapira=stored_snapshot.rapira,
+                    fetched_at=min(exact_altyn_quote.as_of, stored_snapshot.fetched_at),
+                )
+                amount = calculate_amount(snapshot)
+            spread = calculate_spread(snapshot)
         except InvalidAmountError:
             await message.answer(INVALID_AMOUNT_TEXT, reply_markup=main_keyboard(subscribed))
+            return
+        except InsufficientAmountError:
+            await message.answer(AMOUNT_TOO_SMALL_TEXT, reply_markup=main_keyboard(subscribed))
+            return
+        except MarketDataError as exc:
+            if exc.code == "client_rate_limit":
+                logger.info("On-demand Altyn quote was locally rate-limited")
+                text = TOO_MANY_REQUESTS_TEXT
+            else:
+                logger.warning(
+                    "On-demand Altyn quote failed: service=%s code=%s",
+                    exc.service,
+                    exc.code,
+                )
+                text = RATES_UNAVAILABLE_TEXT
+            await message.answer(text, reply_markup=main_keyboard(subscribed))
             return
         except RatesUnavailableError:
             await message.answer(RATES_UNAVAILABLE_TEXT, reply_markup=main_keyboard(subscribed))

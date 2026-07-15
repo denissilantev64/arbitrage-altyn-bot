@@ -41,8 +41,7 @@ async def run(settings: Settings) -> None:
         ) as http_session:
             collector = RateCollector(
                 http_session,
-                altyn_buy_fee_rate=settings.altyn_buy_fee_rate,
-                altyn_sell_fee_rate=settings.altyn_sell_fee_rate,
+                altyn_arbitrage_token=settings.altyn_arbitrage_token,
             )
             await collect_and_store_rates(collector, repository)
 
@@ -53,7 +52,7 @@ async def run(settings: Settings) -> None:
                     link_preview_is_disabled=True,
                 ),
             )
-            dispatcher = build_dispatcher(repository, settings)
+            dispatcher = build_dispatcher(repository, settings, collector)
             stop_event = asyncio.Event()
             polling_task: asyncio.Task[None] | None = None
             rate_task: asyncio.Task[None] | None = None
@@ -83,7 +82,7 @@ async def run(settings: Settings) -> None:
                         bot,
                         close_bot_session=False,
                         allowed_updates=dispatcher.resolve_used_update_types(),
-                        handle_as_tasks=False,
+                        handle_as_tasks=True,
                     ),
                     name="telegram-polling",
                 )
@@ -108,12 +107,16 @@ def _ensure_database_directory(database_path: Path) -> None:
         raise RuntimeError(f"database parent path is not a directory: {parent}")
 
 
-def build_dispatcher(repository: SQLiteRepository, settings: Settings) -> Dispatcher:
+def build_dispatcher(
+    repository: SQLiteRepository,
+    settings: Settings,
+    collector: RateCollector,
+) -> Dispatcher:
     dispatcher = Dispatcher(
         storage=MemoryStorage(),
         events_isolation=SimpleEventIsolation(),
     )
-    dispatcher.include_router(create_router(repository, settings))
+    dispatcher.include_router(create_router(repository, settings, collector))
     return dispatcher
 
 

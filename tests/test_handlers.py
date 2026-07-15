@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
@@ -24,9 +25,10 @@ from aiogram.types import (
 )
 
 from arbitrage_bot.application import build_dispatcher
-from arbitrage_bot.calculations import calculate_amount, calculate_best_spread
+from arbitrage_bot.calculations import calculate_amount, calculate_spread
 from arbitrage_bot.config import Settings
-from arbitrage_bot.domain import BuyFeeMode, Exchange, ExchangeQuote, RateSnapshot
+from arbitrage_bot.domain import AltynBuyQuote, BuyFeeMode, Exchange, ExchangeQuote, RateSnapshot
+from arbitrage_bot.errors import MarketDataError
 from arbitrage_bot.formatting import format_spread_message
 from arbitrage_bot.keyboards import (
     CALCULATE_BUTTON,
@@ -39,9 +41,12 @@ from arbitrage_bot.repository import SQLiteRepository
 from arbitrage_bot.texts import (
     AMOUNT_PROMPT,
     HELP_TEXT,
+    INVALID_AMOUNT_TEXT,
+    RATES_UNAVAILABLE_TEXT,
     START_TEXT,
     SUBSCRIBED_TEXT,
     SUPPORT_TEXT,
+    TOO_MANY_REQUESTS_TEXT,
     UNSUBSCRIBED_TEXT,
 )
 
@@ -117,14 +122,14 @@ class HandlerHarness:
 
 
 def _snapshot() -> RateSnapshot:
+    now = datetime.now(UTC)
     return RateSnapshot(
-        altyn=ExchangeQuote(
-            exchange=Exchange.ALTYN,
-            bid=Decimal("77.20"),
-            ask=Decimal("77.39"),
-            buy_fee_rate=Decimal("0.015"),
-            sell_fee_rate=Decimal("0"),
-            buy_fee_mode=BuyFeeMode.ADDED_TO_QUOTE,
+        altyn=AltynBuyQuote(
+            amount_rub=Decimal("1000000"),
+            rate=Decimal("79.88"),
+            network_fee_usdt=Decimal("3"),
+            indicative=True,
+            as_of=now,
         ),
         rapira=ExchangeQuote(
             exchange=Exchange.RAPIRA,
@@ -134,7 +139,7 @@ def _snapshot() -> RateSnapshot:
             sell_fee_rate=Decimal("0.001"),
             buy_fee_mode=BuyFeeMode.DEDUCTED_FROM_BASE,
         ),
-        fetched_at=datetime.now(UTC),
+        fetched_at=now,
     )
 
 
@@ -154,9 +159,7 @@ def _assert_support_link(message: SendMessage) -> None:
 
 
 def test_command_texts_match_the_public_menu_copy() -> None:
-    assert (
-        "В расчете по сумме учитываются настроенные комиссии Altyn и актуальная комиссия Rapira."
-    ) in START_TEXT
+    assert ("В расчете по сумме персональная комиссия Altyn уже включена в курс.") in START_TEXT
     assert START_TEXT.endswith("Можно также нажать «Показать спред» или «Поддержка».")
     assert "Exchange" not in START_TEXT
     assert "🇧🇾" not in START_TEXT
@@ -178,12 +181,13 @@ async def test_all_requested_private_chat_flows(tmp_path: Path) -> None:
     )
     settings = Settings(
         telegram_bot_token=bot.token,
+        altyn_arbitrage_token="a" * 64,
         database_path=tmp_path / "handlers.sqlite3",
         support_url=_SUPPORT_URL,
-        altyn_buy_fee_rate=Decimal("0"),
-        altyn_sell_fee_rate=Decimal("0"),
     )
-    dispatcher = build_dispatcher(repository, settings)
+    quote_provider = AsyncMock()
+    quote_provider.fetch_altyn_quote.return_value = snapshot.altyn
+    dispatcher = build_dispatcher(repository, settings, quote_provider)
     harness = HandlerHarness(bot, dispatcher, repository, session)
 
     try:
@@ -193,20 +197,22 @@ async def test_all_requested_private_chat_flows(tmp_path: Path) -> None:
         assert UNSUBSCRIBE_BUTTON in _reply_button_texts(replies[0])
         assert await repository.is_subscribed(_CHAT_ID) is True
 
-        spread = calculate_best_spread(snapshot)
+        spread = calculate_spread(snapshot)
         expected_spread = format_spread_message(spread)
         replies = await harness.feed("/spread")
         assert [reply.text for reply in replies] == [expected_spread]
 
         replies = await harness.feed(SHOW_SPREAD_BUTTON)
         assert [reply.text for reply in replies] == [expected_spread]
+        quote_provider.fetch_altyn_quote.assert_not_awaited()
 
         expected_amount = format_spread_message(
             spread,
-            calculate_amount(spread, Decimal("1000000")),
+            calculate_amount(snapshot),
         )
         replies = await harness.feed("/spread 1000000")
         assert [reply.text for reply in replies] == [expected_amount]
+        quote_provider.fetch_altyn_quote.assert_awaited_with(Decimal("1000000"))
 
         replies = await harness.feed(CALCULATE_BUTTON)
         assert [reply.text for reply in replies] == [AMOUNT_PROMPT]
@@ -237,6 +243,61 @@ async def test_all_requested_private_chat_flows(tmp_path: Path) -> None:
         replies = await harness.feed(SUPPORT_BUTTON)
         assert len(replies) == 1
         _assert_support_link(replies[0])
+    finally:
+        await dispatcher.storage.close()
+        await bot.session.close()
+        await repository.close()
+
+
+async def test_amount_request_validates_input_and_handles_altyn_failure(tmp_path: Path) -> None:
+    repository = SQLiteRepository(tmp_path / "handler-errors.sqlite3")
+    await repository.connect()
+    await repository.initialize()
+    await repository.save_snapshot(_snapshot())
+
+    session = RecordingSession()
+    bot = Bot("123456789:" + "A" * 35, session=session)
+    settings = Settings(
+        telegram_bot_token=bot.token,
+        altyn_arbitrage_token="a" * 64,
+        database_path=tmp_path / "handler-errors.sqlite3",
+        support_url=_SUPPORT_URL,
+    )
+    quote_provider = AsyncMock()
+    quote_provider.fetch_altyn_quote.side_effect = MarketDataError(
+        "altyn",
+        "http_status",
+        "HTTP request failed with status 429",
+    )
+    dispatcher = build_dispatcher(repository, settings, quote_provider)
+    harness = HandlerHarness(bot, dispatcher, repository, session)
+
+    try:
+        invalid_replies = await harness.feed("/spread not-a-number")
+        assert [reply.text for reply in invalid_replies] == [INVALID_AMOUNT_TEXT]
+        quote_provider.fetch_altyn_quote.assert_not_awaited()
+
+        unavailable_replies = await harness.feed("/spread 1000000")
+        assert [reply.text for reply in unavailable_replies] == [RATES_UNAVAILABLE_TEXT]
+        quote_provider.fetch_altyn_quote.assert_awaited_once_with(Decimal("1000000"))
+
+        quote_provider.fetch_altyn_quote.reset_mock(side_effect=True)
+        quote_provider.fetch_altyn_quote.side_effect = MarketDataError(
+            "altyn",
+            "client_rate_limit",
+            "Altyn request is locally rate-limited",
+        )
+        limited_replies = await harness.feed("/spread 2000000")
+        assert [reply.text for reply in limited_replies] == [TOO_MANY_REQUESTS_TEXT]
+
+        async def invalidate_snapshot(_amount: Decimal) -> AltynBuyQuote:
+            await repository.record_refresh_failure("rapira", "request_failed")
+            return _snapshot().altyn
+
+        quote_provider.fetch_altyn_quote.reset_mock(side_effect=True)
+        quote_provider.fetch_altyn_quote.side_effect = invalidate_snapshot
+        invalidated_replies = await harness.feed("/spread 3000000")
+        assert [reply.text for reply in invalidated_replies] == [RATES_UNAVAILABLE_TEXT]
     finally:
         await dispatcher.storage.close()
         await bot.session.close()

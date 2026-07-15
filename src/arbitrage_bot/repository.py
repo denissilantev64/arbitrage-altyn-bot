@@ -9,10 +9,10 @@ from typing import Final, Literal
 
 import aiosqlite
 
-from .domain import BuyFeeMode, Exchange, ExchangeQuote, RateSnapshot
+from .domain import AltynBuyQuote, BuyFeeMode, Exchange, ExchangeQuote, RateSnapshot
 from .errors import RatesUnavailableError
 
-_SCHEMA_VERSION: Final = 1
+_SCHEMA_VERSION: Final = 2
 _BUSY_TIMEOUT_MS: Final = 5_000
 _MAX_FUTURE_SKEW_SECONDS: Final = Decimal("5")
 
@@ -25,7 +25,7 @@ class _SchemaDefinition:
     sql: str
 
 
-_SCHEMA_DEFINITIONS: Final[tuple[_SchemaDefinition, ...]] = (
+_SCHEMA_V1_DEFINITIONS: Final[tuple[_SchemaDefinition, ...]] = (
     _SchemaDefinition(
         object_type="table",
         name="rate_snapshots",
@@ -129,6 +129,118 @@ _SCHEMA_DEFINITIONS: Final[tuple[_SchemaDefinition, ...]] = (
 )
 
 
+_V2_ARCHIVE_SCHEMA_DEFINITIONS: Final[tuple[_SchemaDefinition, ...]] = (
+    _SchemaDefinition(
+        object_type="table",
+        name="rate_snapshots_v1_archive",
+        table_name="rate_snapshots_v1_archive",
+        sql="""
+            CREATE TABLE rate_snapshots_v1_archive (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                altyn_bid TEXT NOT NULL,
+                altyn_ask TEXT NOT NULL,
+                altyn_buy_fee_rate TEXT NOT NULL,
+                altyn_sell_fee_rate TEXT NOT NULL,
+                altyn_buy_fee_mode TEXT NOT NULL,
+                rapira_bid TEXT NOT NULL,
+                rapira_ask TEXT NOT NULL,
+                rapira_buy_fee_rate TEXT NOT NULL,
+                rapira_sell_fee_rate TEXT NOT NULL,
+                rapira_buy_fee_mode TEXT NOT NULL,
+                fetched_at TEXT NOT NULL
+            )
+        """,
+    ),
+    _SchemaDefinition(
+        object_type="table",
+        name="rate_refresh_state_v1_archive",
+        table_name="rate_refresh_state_v1_archive",
+        sql="""
+            CREATE TABLE rate_refresh_state_v1_archive (
+                singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+                status TEXT NOT NULL CHECK (status IN ('success', 'failure')),
+                attempted_at TEXT NOT NULL,
+                snapshot_id INTEGER,
+                service TEXT,
+                error_code TEXT,
+                FOREIGN KEY (snapshot_id) REFERENCES rate_snapshots_v1_archive (id),
+                CHECK (
+                    (status = 'success' AND snapshot_id IS NOT NULL
+                        AND service IS NULL AND error_code IS NULL)
+                    OR
+                    (status = 'failure' AND snapshot_id IS NULL
+                        AND service IS NOT NULL AND error_code IS NOT NULL)
+                )
+            )
+        """,
+    ),
+)
+
+
+_V2_CURRENT_RATE_SCHEMA_DEFINITIONS: Final[tuple[_SchemaDefinition, ...]] = (
+    _SchemaDefinition(
+        object_type="table",
+        name="rate_snapshots",
+        table_name="rate_snapshots",
+        sql="""
+            CREATE TABLE rate_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                altyn_amount_rub TEXT NOT NULL,
+                altyn_rate TEXT NOT NULL,
+                altyn_network_fee_usdt TEXT NOT NULL,
+                altyn_indicative INTEGER NOT NULL CHECK (altyn_indicative IN (0, 1)),
+                altyn_as_of TEXT NOT NULL,
+                rapira_bid TEXT NOT NULL,
+                rapira_ask TEXT NOT NULL,
+                rapira_buy_fee_rate TEXT NOT NULL,
+                rapira_sell_fee_rate TEXT NOT NULL,
+                rapira_buy_fee_mode TEXT NOT NULL,
+                fetched_at TEXT NOT NULL
+            )
+        """,
+    ),
+    _SchemaDefinition(
+        object_type="index",
+        name="rate_snapshots_fetched_at_idx",
+        table_name="rate_snapshots",
+        sql="""
+            CREATE INDEX rate_snapshots_fetched_at_idx
+            ON rate_snapshots (fetched_at DESC, id DESC)
+        """,
+    ),
+    _SchemaDefinition(
+        object_type="table",
+        name="rate_refresh_state",
+        table_name="rate_refresh_state",
+        sql="""
+            CREATE TABLE rate_refresh_state (
+                singleton_id INTEGER PRIMARY KEY CHECK (singleton_id = 1),
+                status TEXT NOT NULL CHECK (status IN ('success', 'failure')),
+                attempted_at TEXT NOT NULL,
+                snapshot_id INTEGER,
+                service TEXT,
+                error_code TEXT,
+                FOREIGN KEY (snapshot_id) REFERENCES rate_snapshots (id),
+                CHECK (
+                    (status = 'success' AND snapshot_id IS NOT NULL
+                        AND service IS NULL AND error_code IS NULL)
+                    OR
+                    (status = 'failure' AND snapshot_id IS NULL
+                        AND service IS NOT NULL AND error_code IS NOT NULL)
+                )
+            )
+        """,
+    ),
+)
+
+
+_SCHEMA_DEFINITIONS: Final[tuple[_SchemaDefinition, ...]] = (
+    *_V2_ARCHIVE_SCHEMA_DEFINITIONS,
+    *_V2_CURRENT_RATE_SCHEMA_DEFINITIONS,
+    *_SCHEMA_V1_DEFINITIONS[3:],
+)
+
+
 @dataclass(frozen=True, slots=True)
 class MorningBroadcastBatch:
     message: str
@@ -164,12 +276,16 @@ class SQLiteRepository:
             self._connection = connection
 
     async def initialize(self) -> None:
-        """Create a new version-1 schema or validate an existing one."""
+        """Create a new version-2 schema, migrate version 1, or validate version 2."""
         async with self._lock:
             connection = self._require_connection()
             version = await self._read_schema_version(connection)
 
             if version == _SCHEMA_VERSION:
+                await self._validate_schema(connection)
+                return
+            if version == 1:
+                await self._migrate_v1_to_v2(connection)
                 await self._validate_schema(connection)
                 return
             if version != 0:
@@ -197,6 +313,120 @@ class SQLiteRepository:
 
             await self._validate_schema(connection)
 
+    async def _migrate_v1_to_v2(self, connection: aiosqlite.Connection) -> None:
+        await connection.execute("BEGIN IMMEDIATE")
+        try:
+            version = await self._read_schema_version(connection)
+            if version != 1:
+                raise RuntimeError(
+                    "database schema version changed while waiting for the migration lock"
+                )
+            await self._validate_schema(connection, _SCHEMA_V1_DEFINITIONS)
+
+            for definition in _V2_ARCHIVE_SCHEMA_DEFINITIONS:
+                await connection.execute(definition.sql)
+            await connection.execute(
+                """
+                INSERT INTO rate_snapshots_v1_archive (
+                    id,
+                    altyn_bid,
+                    altyn_ask,
+                    altyn_buy_fee_rate,
+                    altyn_sell_fee_rate,
+                    altyn_buy_fee_mode,
+                    rapira_bid,
+                    rapira_ask,
+                    rapira_buy_fee_rate,
+                    rapira_sell_fee_rate,
+                    rapira_buy_fee_mode,
+                    fetched_at
+                )
+                SELECT
+                    id,
+                    altyn_bid,
+                    altyn_ask,
+                    altyn_buy_fee_rate,
+                    altyn_sell_fee_rate,
+                    altyn_buy_fee_mode,
+                    rapira_bid,
+                    rapira_ask,
+                    rapira_buy_fee_rate,
+                    rapira_sell_fee_rate,
+                    rapira_buy_fee_mode,
+                    fetched_at
+                FROM rate_snapshots
+                ORDER BY id
+                """
+            )
+            await connection.execute(
+                """
+                INSERT INTO rate_refresh_state_v1_archive (
+                    singleton_id,
+                    status,
+                    attempted_at,
+                    snapshot_id,
+                    service,
+                    error_code
+                )
+                SELECT
+                    singleton_id,
+                    status,
+                    attempted_at,
+                    snapshot_id,
+                    service,
+                    error_code
+                FROM rate_refresh_state
+                """
+            )
+            await self._validate_v1_archive_copy(connection)
+
+            await connection.execute("DROP TABLE rate_refresh_state")
+            await connection.execute("DROP INDEX rate_snapshots_fetched_at_idx")
+            await connection.execute("DROP TABLE rate_snapshots")
+            for definition in _V2_CURRENT_RATE_SCHEMA_DEFINITIONS:
+                await connection.execute(definition.sql)
+
+            await self._validate_foreign_keys(connection)
+            await connection.execute(f"PRAGMA user_version = {_SCHEMA_VERSION}")
+            await connection.commit()
+        except BaseException:
+            await connection.rollback()
+            raise
+
+    @staticmethod
+    async def _validate_v1_archive_copy(connection: aiosqlite.Connection) -> None:
+        cursor = await connection.execute(
+            """
+            SELECT
+                (SELECT COUNT(*) FROM rate_snapshots),
+                (SELECT COUNT(*) FROM rate_snapshots_v1_archive),
+                (SELECT COUNT(*) FROM rate_refresh_state),
+                (SELECT COUNT(*) FROM rate_refresh_state_v1_archive)
+            """
+        )
+        try:
+            row = await cursor.fetchone()
+        finally:
+            await cursor.close()
+        if (
+            row is None
+            or len(row) != 4
+            or any(not isinstance(value, int) for value in row)
+            or row[0] != row[1]
+            or row[2] != row[3]
+        ):
+            raise RuntimeError("version-1 rate data was not copied completely")
+
+    @staticmethod
+    async def _validate_foreign_keys(connection: aiosqlite.Connection) -> None:
+        cursor = await connection.execute("PRAGMA foreign_key_check")
+        try:
+            violation = await cursor.fetchone()
+        finally:
+            await cursor.close()
+        if violation is not None:
+            raise RuntimeError("database has a foreign key violation after migration")
+
     async def close(self) -> None:
         """Close the database connection. Calling this twice is safe."""
         async with self._lock:
@@ -221,11 +451,11 @@ class SQLiteRepository:
 
     async def save_snapshot(self, snapshot: RateSnapshot) -> None:
         values = (
-            str(snapshot.altyn.bid),
-            str(snapshot.altyn.ask),
-            str(snapshot.altyn.buy_fee_rate),
-            str(snapshot.altyn.sell_fee_rate),
-            snapshot.altyn.buy_fee_mode.value,
+            str(snapshot.altyn.amount_rub),
+            str(snapshot.altyn.rate),
+            str(snapshot.altyn.network_fee_usdt),
+            int(snapshot.altyn.indicative),
+            _datetime_to_storage(snapshot.altyn.as_of),
             str(snapshot.rapira.bid),
             str(snapshot.rapira.ask),
             str(snapshot.rapira.buy_fee_rate),
@@ -241,11 +471,11 @@ class SQLiteRepository:
                 cursor = await connection.execute(
                     """
                     INSERT INTO rate_snapshots (
-                        altyn_bid,
-                        altyn_ask,
-                        altyn_buy_fee_rate,
-                        altyn_sell_fee_rate,
-                        altyn_buy_fee_mode,
+                        altyn_amount_rub,
+                        altyn_rate,
+                        altyn_network_fee_usdt,
+                        altyn_indicative,
+                        altyn_as_of,
                         rapira_bid,
                         rapira_ask,
                         rapira_buy_fee_rate,
@@ -347,11 +577,11 @@ class SQLiteRepository:
             cursor = await connection.execute(
                 """
                 SELECT
-                    altyn_bid,
-                    altyn_ask,
-                    altyn_buy_fee_rate,
-                    altyn_sell_fee_rate,
-                    altyn_buy_fee_mode,
+                    altyn_amount_rub,
+                    altyn_rate,
+                    altyn_network_fee_usdt,
+                    altyn_indicative,
+                    altyn_as_of,
                     rapira_bid,
                     rapira_ask,
                     rapira_buy_fee_rate,
@@ -668,7 +898,10 @@ class SQLiteRepository:
         return names
 
     @staticmethod
-    async def _validate_schema(connection: aiosqlite.Connection) -> None:
+    async def _validate_schema(
+        connection: aiosqlite.Connection,
+        definitions: tuple[_SchemaDefinition, ...] = _SCHEMA_DEFINITIONS,
+    ) -> None:
         cursor = await connection.execute(
             """
             SELECT type, name, tbl_name, sql
@@ -701,7 +934,7 @@ class SQLiteRepository:
                 definition.table_name,
                 _normalize_schema_sql(definition.sql),
             )
-            for definition in _SCHEMA_DEFINITIONS
+            for definition in definitions
         }
         if actual.keys() != expected.keys():
             expected_names = sorted(f"{kind}:{name}" for kind, name in expected)
@@ -878,13 +1111,12 @@ def _snapshot_from_row(row: tuple[object, ...] | aiosqlite.Row) -> RateSnapshot:
     if len(row) != 11:
         raise RuntimeError("stored rate snapshot has an invalid field count")
     try:
-        altyn = ExchangeQuote(
-            exchange=Exchange.ALTYN,
-            bid=_stored_decimal(row[0], "altyn_bid"),
-            ask=_stored_decimal(row[1], "altyn_ask"),
-            buy_fee_rate=_stored_decimal(row[2], "altyn_buy_fee_rate"),
-            sell_fee_rate=_stored_decimal(row[3], "altyn_sell_fee_rate"),
-            buy_fee_mode=BuyFeeMode(_stored_text(row[4], "altyn_buy_fee_mode")),
+        altyn = AltynBuyQuote(
+            amount_rub=_stored_decimal(row[0], "altyn_amount_rub"),
+            rate=_stored_decimal(row[1], "altyn_rate"),
+            network_fee_usdt=_stored_decimal(row[2], "altyn_network_fee_usdt"),
+            indicative=_stored_bool(row[3], "altyn_indicative"),
+            as_of=_datetime_from_storage(row[4], "altyn_as_of"),
         )
         rapira = ExchangeQuote(
             exchange=Exchange.RAPIRA,
@@ -928,6 +1160,12 @@ def _stored_text(value: object, field: str) -> str:
     if not isinstance(value, str) or not value:
         raise RuntimeError(f"stored {field} is not valid text")
     return value
+
+
+def _stored_bool(value: object, field: str) -> bool:
+    if not isinstance(value, int) or isinstance(value, bool) or value not in (0, 1):
+        raise RuntimeError(f"stored {field} is not a boolean")
+    return bool(value)
 
 
 def _datetime_to_storage(value: datetime) -> str:

@@ -17,13 +17,50 @@ class BuyFeeMode(StrEnum):
 
 
 def _require_finite_positive(value: Decimal, field: str) -> None:
+    if not isinstance(value, Decimal):
+        raise TypeError(f"{field} must be a Decimal")
     if not value.is_finite() or value <= 0:
         raise ValueError(f"{field} must be finite and positive")
 
 
+def _require_finite_non_negative(value: Decimal, field: str) -> None:
+    if not isinstance(value, Decimal):
+        raise TypeError(f"{field} must be a Decimal")
+    if not value.is_finite() or value < 0:
+        raise ValueError(f"{field} must be finite and non-negative")
+
+
 def _require_fee(value: Decimal, field: str) -> None:
+    if not isinstance(value, Decimal):
+        raise TypeError(f"{field} must be a Decimal")
     if not value.is_finite() or value < 0 or value >= 1:
         raise ValueError(f"{field} must be finite and in [0, 1)")
+
+
+def _require_aware_datetime(value: datetime, field: str) -> None:
+    if not isinstance(value, datetime):
+        raise TypeError(f"{field} must be a datetime")
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError(f"{field} must be timezone-aware")
+
+
+@dataclass(frozen=True, slots=True)
+class AltynBuyQuote:
+    """An amount-specific Altyn quote for buying USDT with RUB."""
+
+    amount_rub: Decimal
+    rate: Decimal
+    network_fee_usdt: Decimal
+    indicative: bool
+    as_of: datetime
+
+    def __post_init__(self) -> None:
+        _require_finite_positive(self.amount_rub, "amount_rub")
+        _require_finite_positive(self.rate, "rate")
+        _require_finite_non_negative(self.network_fee_usdt, "network_fee_usdt")
+        if not isinstance(self.indicative, bool):
+            raise TypeError("indicative must be a bool")
+        _require_aware_datetime(self.as_of, "as_of")
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,19 +97,18 @@ class ExchangeQuote:
 
 @dataclass(frozen=True, slots=True)
 class RateSnapshot:
-    altyn: ExchangeQuote
+    altyn: AltynBuyQuote
     rapira: ExchangeQuote
     fetched_at: datetime
 
     def __post_init__(self) -> None:
-        if self.altyn.exchange is not Exchange.ALTYN:
-            raise ValueError("altyn quote has the wrong exchange")
+        if not isinstance(self.altyn, AltynBuyQuote):
+            raise TypeError("altyn must be an AltynBuyQuote")
+        if not isinstance(self.rapira, ExchangeQuote):
+            raise TypeError("rapira must be an ExchangeQuote")
         if self.rapira.exchange is not Exchange.RAPIRA:
             raise ValueError("rapira quote has the wrong exchange")
-        if not isinstance(self.fetched_at, datetime):
-            raise TypeError("fetched_at must be a datetime")
-        if self.fetched_at.tzinfo is None or self.fetched_at.utcoffset() is None:
-            raise ValueError("fetched_at must be timezone-aware")
+        _require_aware_datetime(self.fetched_at, "fetched_at")
 
     def age_seconds(self, now: datetime | None = None) -> Decimal:
         current = now or datetime.now(UTC)
@@ -83,14 +119,10 @@ class RateSnapshot:
 
 @dataclass(frozen=True, slots=True)
 class SpreadResult:
-    buy_exchange: Exchange
-    sell_exchange: Exchange
-    raw_buy: Decimal
-    raw_sell: Decimal
-    effective_buy: Decimal
-    effective_sell: Decimal
-    buy_fee_rate: Decimal
-    sell_fee_rate: Decimal
+    altyn_rate: Decimal
+    rapira_bid: Decimal
+    rapira_effective_bid: Decimal
+    rapira_sell_fee_rate: Decimal
     gross_spread_rub: Decimal
     gross_spread_percent: Decimal
     net_spread_rub: Decimal
@@ -100,6 +132,8 @@ class SpreadResult:
 @dataclass(frozen=True, slots=True)
 class AmountResult:
     amount_rub: Decimal
+    usdt_bought: Decimal
+    network_fee_usdt: Decimal
     usdt_to_sell: Decimal
     final_rub: Decimal
     profit_rub: Decimal

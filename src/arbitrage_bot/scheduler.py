@@ -14,7 +14,7 @@ from aiogram.exceptions import (
     TelegramRetryAfter,
 )
 
-from .calculations import calculate_best_spread
+from .calculations import calculate_spread
 from .constants import (
     MORNING_BROADCAST_RETRY_SECONDS,
     MORNING_HOUR_MSK,
@@ -64,9 +64,9 @@ async def collect_and_store_rates(
     await repository.save_snapshot(snapshot)
 
     logger.info(
-        "Rates stored: altyn_bid=%s altyn_ask=%s rapira_bid=%s rapira_ask=%s",
-        snapshot.altyn.bid,
-        snapshot.altyn.ask,
+        "Rates stored: altyn_rate=%s altyn_amount_rub=%s rapira_bid=%s rapira_ask=%s",
+        snapshot.altyn.rate,
+        snapshot.altyn.amount_rub,
         snapshot.rapira.bid,
         snapshot.rapira.ask,
     )
@@ -142,7 +142,7 @@ async def send_morning_broadcast(
             logger.warning("Morning broadcast is waiting for current rates", exc_info=True)
             return False
 
-        text = format_spread_message(calculate_best_spread(snapshot))
+        text = format_spread_message(calculate_spread(snapshot))
         batch = await repository.prepare_morning_broadcast(run_date, text)
     if batch.complete:
         return True

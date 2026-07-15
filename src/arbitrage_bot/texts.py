@@ -1,4 +1,4 @@
-# ruff: noqa: RUF001 -- user-facing text is intentionally written in Russian.
+# ruff: noqa: E501, RUF001 -- user-facing text is intentionally written in Russian.
 
 from __future__ import annotations
 
@@ -13,7 +13,7 @@ START_TEXT = """<b>Altyn/Rapira spread bot</b>
 
 Утренний спред приходит автоматически в 09:00 МСК по будням после первого сообщения боту.
 
-В расчете по сумме учитываются настроенные комиссии Altyn и актуальная комиссия Rapira.
+В расчете по сумме персональная комиссия Altyn уже включена в курс. Отдельно учитываются сетевая комиссия и актуальная комиссия Rapira.
 
 Можно также нажать «Показать спред» или «Поддержка»."""
 
@@ -26,11 +26,13 @@ HELP_TEXT = """<b>Команды бота</b>
 /help - команды бота"""
 
 AMOUNT_PROMPT = "Введите сумму в RUB, например: <code>1000000</code>."
+AMOUNT_TOO_SMALL_TEXT = "Сумма недостаточна для покрытия сетевой комиссии."
 INVALID_AMOUNT_TEXT = (
     "Укажите сумму в RUB положительным числом с максимум двумя знаками после запятой, "
     "например: <code>/spread 1000000</code>."
 )
 RATES_UNAVAILABLE_TEXT = "Актуальные курсы сейчас недоступны. Попробуйте через несколько минут."
+TOO_MANY_REQUESTS_TEXT = "Слишком много расчетов. Повторите запрос через 10 секунд."
 GENERIC_ERROR_TEXT = "Не удалось выполнить запрос из-за внутренней ошибки. Попробуйте позже."
 SUBSCRIBED_TEXT = "Подписка включена"
 UNSUBSCRIBED_TEXT = "Подписка отключена"

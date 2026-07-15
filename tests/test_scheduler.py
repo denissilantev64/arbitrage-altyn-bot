@@ -13,12 +13,13 @@ from aiogram.methods import SendMessage
 
 import arbitrage_bot.scheduler as scheduler_module
 from arbitrage_bot.constants import (
+    ALTYN_MIN_REQUEST_INTERVAL_SECONDS,
     HTTP_TIMEOUT_SECONDS,
     MORNING_BROADCAST_RETRY_SECONDS,
     RATE_MAX_AGE_SECONDS,
     RATE_REFRESH_SECONDS,
 )
-from arbitrage_bot.domain import BuyFeeMode, Exchange, ExchangeQuote, RateSnapshot
+from arbitrage_bot.domain import AltynBuyQuote, BuyFeeMode, Exchange, ExchangeQuote, RateSnapshot
 from arbitrage_bot.errors import MarketDataError, RatesUnavailableError
 from arbitrage_bot.repository import MorningBroadcastBatch
 from arbitrage_bot.scheduler import (
@@ -33,13 +34,12 @@ from arbitrage_bot.scheduler import (
 
 def _snapshot() -> RateSnapshot:
     return RateSnapshot(
-        altyn=ExchangeQuote(
-            exchange=Exchange.ALTYN,
-            bid=Decimal("77.25"),
-            ask=Decimal("80.46"),
-            buy_fee_rate=Decimal("0.015"),
-            sell_fee_rate=Decimal("0"),
-            buy_fee_mode=BuyFeeMode.ADDED_TO_QUOTE,
+        altyn=AltynBuyQuote(
+            amount_rub=Decimal("1000000"),
+            rate=Decimal("79.88"),
+            network_fee_usdt=Decimal("3"),
+            indicative=True,
+            as_of=datetime(2026, 7, 13, 5, 59, tzinfo=UTC),
         ),
         rapira=ExchangeQuote(
             exchange=Exchange.RAPIRA,
@@ -54,13 +54,14 @@ def _snapshot() -> RateSnapshot:
 
 
 def test_runtime_intervals_keep_market_refresh_and_broadcast_retry_independent() -> None:
-    assert RATE_REFRESH_SECONDS == 5 * 60
-    assert RATE_MAX_AGE_SECONDS == 6 * 60
+    assert RATE_REFRESH_SECONDS == 60
+    assert RATE_MAX_AGE_SECONDS == 2 * 60
     assert MORNING_BROADCAST_RETRY_SECONDS == 60
     assert RATE_MAX_AGE_SECONDS >= RATE_REFRESH_SECONDS + HTTP_TIMEOUT_SECONDS
+    assert 86_400 / ALTYN_MIN_REQUEST_INTERVAL_SECONDS < 10_000
 
 
-async def test_rate_refresh_loop_waits_five_minutes_between_collections(
+async def test_rate_refresh_loop_waits_one_minute_between_collections(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     delays: list[float] = []
