@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import signal
 from pathlib import Path
 
 import aiohttp
@@ -54,9 +55,11 @@ async def run(settings: Settings) -> None:
             )
             dispatcher = build_dispatcher(repository)
             stop_event = asyncio.Event()
+            shutdown_event = asyncio.Event()
             polling_task: asyncio.Task[None] | None = None
             rate_task: asyncio.Task[None] | None = None
             broadcast_task: asyncio.Task[None] | None = None
+            installed_signals = _install_shutdown_signal_handlers(shutdown_event)
             try:
                 await bot.delete_webhook(drop_pending_updates=False)
                 await bot.set_my_commands(
@@ -83,6 +86,7 @@ async def run(settings: Settings) -> None:
                         close_bot_session=False,
                         allowed_updates=dispatcher.resolve_used_update_types(),
                         handle_as_tasks=True,
+                        handle_signals=False,
                     ),
                     name="telegram-polling",
                 )
@@ -90,8 +94,10 @@ async def run(settings: Settings) -> None:
                     polling_task,
                     rate_task,
                     broadcast_task,
+                    shutdown_event,
                 )
             finally:
+                _remove_shutdown_signal_handlers(installed_signals)
                 stop_event.set()
                 await _cancel_tasks(polling_task, rate_task, broadcast_task)
                 await dispatcher.storage.close()
@@ -130,24 +136,63 @@ async def _supervise_runtime(
     polling_task: asyncio.Task[None],
     rate_task: asyncio.Task[None],
     broadcast_task: asyncio.Task[None],
+    shutdown_event: asyncio.Event,
 ) -> None:
     tasks = {polling_task, rate_task, broadcast_task}
-    done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+    shutdown_task = asyncio.create_task(
+        _wait_for_shutdown(shutdown_event),
+        name="shutdown-signal",
+    )
+    try:
+        done, _ = await asyncio.wait(
+            {*tasks, shutdown_task},
+            return_when=asyncio.FIRST_COMPLETED,
+        )
 
-    for task in done:
-        if task is polling_task:
-            continue
+        stopped_runtime_tasks = done & tasks
+        for task in stopped_runtime_tasks:
+            if task.cancelled() or task.exception() is not None:
+                await task
+
+        if polling_task in stopped_runtime_tasks:
+            await polling_task
+            raise RuntimeError("Telegram polling stopped unexpectedly")
+
+        if stopped_runtime_tasks:
+            stopped_task = next(iter(stopped_runtime_tasks))
+            await stopped_task
+            raise RuntimeError(f"background task {stopped_task.get_name()!r} stopped unexpectedly")
+
+        if shutdown_task in done:
+            return
+
+        raise RuntimeError("runtime supervisor reached an invalid state")
+    finally:
+        await _cancel_tasks(shutdown_task)
+
+
+async def _wait_for_shutdown(shutdown_event: asyncio.Event) -> None:
+    await shutdown_event.wait()
+
+
+def _install_shutdown_signal_handlers(
+    shutdown_event: asyncio.Event,
+) -> tuple[signal.Signals, ...]:
+    loop = asyncio.get_running_loop()
+    installed: list[signal.Signals] = []
+    for received_signal in (signal.SIGTERM, signal.SIGINT):
         try:
-            await task
-        except asyncio.CancelledError:
-            raise
-        raise RuntimeError(f"background task {task.get_name()!r} stopped unexpectedly")
+            loop.add_signal_handler(received_signal, shutdown_event.set)
+        except NotImplementedError:
+            continue
+        installed.append(received_signal)
+    return tuple(installed)
 
-    if polling_task in done:
-        await polling_task
-        raise RuntimeError("Telegram polling stopped unexpectedly")
 
-    raise RuntimeError("runtime supervisor reached an invalid state")
+def _remove_shutdown_signal_handlers(installed_signals: tuple[signal.Signals, ...]) -> None:
+    loop = asyncio.get_running_loop()
+    for received_signal in installed_signals:
+        loop.remove_signal_handler(received_signal)
 
 
 def main() -> None:

@@ -26,9 +26,10 @@ async def test_supervisor_propagates_background_failure() -> None:
     polling = asyncio.create_task(_wait_forever(), name="polling")
     rate = asyncio.create_task(_fail("rate failed"), name="rate")
     broadcast = asyncio.create_task(_wait_forever(), name="broadcast")
+    shutdown_event = asyncio.Event()
     try:
         with pytest.raises(RuntimeError, match="rate failed"):
-            await _supervise_runtime(polling, rate, broadcast)
+            await _supervise_runtime(polling, rate, broadcast, shutdown_event)
     finally:
         await _cancel_tasks(polling, rate, broadcast)
 
@@ -40,9 +41,40 @@ async def test_supervisor_treats_normal_polling_stop_as_failure() -> None:
     polling = asyncio.create_task(completed(), name="polling")
     rate = asyncio.create_task(_wait_forever(), name="rate")
     broadcast = asyncio.create_task(_wait_forever(), name="broadcast")
+    shutdown_event = asyncio.Event()
     try:
         with pytest.raises(RuntimeError, match="polling stopped unexpectedly"):
-            await _supervise_runtime(polling, rate, broadcast)
+            await _supervise_runtime(polling, rate, broadcast, shutdown_event)
+    finally:
+        await _cancel_tasks(polling, rate, broadcast)
+
+
+async def test_supervisor_treats_normal_background_stop_as_failure() -> None:
+    async def completed() -> None:
+        return None
+
+    polling = asyncio.create_task(_wait_forever(), name="polling")
+    rate = asyncio.create_task(completed(), name="rate")
+    broadcast = asyncio.create_task(_wait_forever(), name="broadcast")
+    shutdown_event = asyncio.Event()
+    try:
+        with pytest.raises(RuntimeError, match="background task 'rate' stopped unexpectedly"):
+            await _supervise_runtime(polling, rate, broadcast, shutdown_event)
+    finally:
+        await _cancel_tasks(polling, rate, broadcast)
+
+
+async def test_supervisor_returns_only_after_explicit_shutdown_request() -> None:
+    polling = asyncio.create_task(_wait_forever(), name="polling")
+    rate = asyncio.create_task(_wait_forever(), name="rate")
+    broadcast = asyncio.create_task(_wait_forever(), name="broadcast")
+    shutdown_event = asyncio.Event()
+    shutdown_event.set()
+    try:
+        await _supervise_runtime(polling, rate, broadcast, shutdown_event)
+        assert not polling.done()
+        assert not rate.done()
+        assert not broadcast.done()
     finally:
         await _cancel_tasks(polling, rate, broadcast)
 
