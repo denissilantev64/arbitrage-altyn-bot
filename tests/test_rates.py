@@ -4,12 +4,10 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
-from unittest.mock import AsyncMock
 
 import aiohttp
 import pytest
 
-import arbitrage_bot.rates as rates_module
 from arbitrage_bot.constants import (
     ALTYN_ARBITRAGE_RATE_URL,
     ALTYN_REFERENCE_AMOUNT_RUB,
@@ -542,7 +540,7 @@ async def test_rate_collector_rejects_bad_http_response(
     session = FakeSession({("GET", ALTYN_ARBITRAGE_RATE_URL): response})
 
     with pytest.raises(MarketDataError) as exc_info:
-        await collector_for(session).fetch_altyn_quote(ALTYN_REFERENCE_AMOUNT_RUB)
+        await collector_for(session).fetch_altyn_reference_quote()
 
     assert exc_info.value.service == "altyn"
     assert exc_info.value.code == expected_code
@@ -556,62 +554,9 @@ async def test_rate_collector_wraps_transport_error_without_retry() -> None:
     )
 
     with pytest.raises(MarketDataError) as exc_info:
-        await collector_for(session).fetch_altyn_quote(ALTYN_REFERENCE_AMOUNT_RUB)
+        await collector_for(session).fetch_altyn_reference_quote()
 
     assert exc_info.value.service == "altyn"
     assert exc_info.value.code == "request_failed"
     assert len(session.calls) == 1
     assert _ALTYN_TOKEN not in str(exc_info.value)
-
-
-@pytest.mark.asyncio
-async def test_rate_collector_caches_same_amount_for_provider_cache_window() -> None:
-    response = FakeResponse(altyn_payload(as_of=datetime.now(UTC)))
-    session = FakeSession({("GET", ALTYN_ARBITRAGE_RATE_URL): response})
-    collector = collector_for(session)
-
-    first = await collector.fetch_altyn_quote(ALTYN_REFERENCE_AMOUNT_RUB)
-    second = await collector.fetch_altyn_quote(Decimal("1000000"))
-
-    assert second is first
-    assert len(session.calls) == 1
-
-
-@pytest.mark.asyncio
-async def test_rate_collector_limits_uncached_altyn_requests_without_retry() -> None:
-    response = FakeResponse(altyn_payload(as_of=datetime.now(UTC)))
-    session = FakeSession({("GET", ALTYN_ARBITRAGE_RATE_URL): response})
-    collector = collector_for(session)
-    await collector.fetch_altyn_quote(ALTYN_REFERENCE_AMOUNT_RUB)
-
-    with pytest.raises(MarketDataError) as exc_info:
-        await collector.fetch_altyn_quote(Decimal("2000000"))
-
-    assert exc_info.value.code == "client_rate_limit"
-    assert len(session.calls) == 1
-
-
-@pytest.mark.asyncio
-async def test_scheduled_altyn_request_waits_for_local_rate_limit(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    first_payload = altyn_payload(as_of=datetime.now(UTC))
-    first_payload["amount_rub"] = "2000000.00"
-    route = ("GET", ALTYN_ARBITRAGE_RATE_URL)
-    session = FakeSession({route: FakeResponse(first_payload)})
-    collector = collector_for(session)
-    await collector.fetch_altyn_quote(Decimal("2000000"))
-
-    session.routes[route] = FakeResponse(altyn_payload(as_of=datetime.now(UTC)))
-    sleep = AsyncMock()
-    monkeypatch.setattr(rates_module.asyncio, "sleep", sleep)
-    quote = await collector.fetch_altyn_quote(
-        ALTYN_REFERENCE_AMOUNT_RUB,
-        wait_for_slot=True,
-    )
-
-    assert quote.amount_rub == ALTYN_REFERENCE_AMOUNT_RUB
-    sleep.assert_awaited_once()
-    delay = sleep.await_args.args[0]
-    assert 0 < delay <= 10
-    assert len(session.calls) == 2

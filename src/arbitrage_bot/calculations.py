@@ -29,9 +29,9 @@ def calculate_spread(snapshot: RateSnapshot) -> SpreadResult:
     )
 
 
-def calculate_amount(snapshot: RateSnapshot) -> AmountResult:
-    """Calculate an exact-amount Altyn-to-Rapira transfer including its network fee."""
-    validated_amount = validate_amount_rub(snapshot.altyn.amount_rub)
+def calculate_amount(snapshot: RateSnapshot, amount_rub: Decimal) -> AmountResult:
+    """Calculate an amount using only the stored market snapshot."""
+    validated_amount = validate_amount_rub(amount_rub)
     usdt_bought = validated_amount / snapshot.altyn.rate
     network_fee_usdt = snapshot.altyn.network_fee_usdt
     if network_fee_usdt >= usdt_bought:

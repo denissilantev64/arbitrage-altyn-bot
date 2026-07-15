@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import re
-import time
 from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from typing import Final, cast
@@ -12,8 +11,6 @@ import aiohttp
 from .amounts import validate_amount_rub
 from .constants import (
     ALTYN_ARBITRAGE_RATE_URL,
-    ALTYN_MIN_REQUEST_INTERVAL_SECONDS,
-    ALTYN_QUOTE_CACHE_SECONDS,
     ALTYN_REFERENCE_AMOUNT_RUB,
     ALTYN_SOURCE_MAX_AGE_SECONDS,
     ALTYN_SOURCE_MAX_FUTURE_SKEW_SECONDS,
@@ -371,9 +368,6 @@ class RateCollector:
             raise ValueError("altyn_arbitrage_token must be 64 lowercase hexadecimal characters")
         self._session = session
         self._altyn_arbitrage_token = altyn_arbitrage_token
-        self._altyn_cache: dict[Decimal, tuple[float, AltynBuyQuote]] = {}
-        self._altyn_lock = asyncio.Lock()
-        self._last_altyn_request_started: float | None = None
         self._timeout = aiohttp.ClientTimeout(total=HTTP_TIMEOUT_SECONDS)
 
     async def _get_json(
@@ -423,60 +417,22 @@ class RateCollector:
         finally:
             response.release()
 
-    async def fetch_altyn_quote(
-        self,
-        amount_rub: Decimal,
-        *,
-        wait_for_slot: bool = False,
-    ) -> AltynBuyQuote:
-        amount, amount_query = _canonical_amount_rub(amount_rub)
-        async with self._altyn_lock:
-            now = time.monotonic()
-            self._altyn_cache = {
-                cached_amount: cached
-                for cached_amount, cached in self._altyn_cache.items()
-                if cached[0] > now
-            }
-            cached = self._altyn_cache.get(amount)
-            if cached is not None:
-                return cached[1]
-
-            if self._last_altyn_request_started is not None:
-                delay = self._last_altyn_request_started + ALTYN_MIN_REQUEST_INTERVAL_SECONDS - now
-                if delay > 0:
-                    if not wait_for_slot:
-                        raise _error(
-                            _ALTYN,
-                            "client_rate_limit",
-                            "Altyn request is locally rate-limited",
-                        )
-                    await asyncio.sleep(delay)
-
-            self._last_altyn_request_started = time.monotonic()
-
-            payload = await self._get_json(
-                ALTYN_ARBITRAGE_RATE_URL,
-                _ALTYN,
-                {
-                    "Accept": "application/json",
-                    "X-Arbitrage-Token": self._altyn_arbitrage_token,
-                },
-                params={"amount_rub": amount_query},
-            )
-            quote = parse_altyn_arbitrage_rate(
-                payload,
-                requested_amount_rub=amount,
-                received_at=datetime.now(UTC),
-            )
-            source_freshness_left = (
-                ALTYN_SOURCE_MAX_AGE_SECONDS - (datetime.now(UTC) - quote.as_of).total_seconds()
-            )
-            cache_seconds = min(ALTYN_QUOTE_CACHE_SECONDS, max(0.0, source_freshness_left))
-            self._altyn_cache[amount] = (
-                time.monotonic() + cache_seconds,
-                quote,
-            )
-            return quote
+    async def fetch_altyn_reference_quote(self) -> AltynBuyQuote:
+        amount, amount_query = _canonical_amount_rub(ALTYN_REFERENCE_AMOUNT_RUB)
+        payload = await self._get_json(
+            ALTYN_ARBITRAGE_RATE_URL,
+            _ALTYN,
+            {
+                "Accept": "application/json",
+                "X-Arbitrage-Token": self._altyn_arbitrage_token,
+            },
+            params={"amount_rub": amount_query},
+        )
+        return parse_altyn_arbitrage_rate(
+            payload,
+            requested_amount_rub=amount,
+            received_at=datetime.now(UTC),
+        )
 
     async def fetch_rapira_quote(self) -> ExchangeQuote:
         depth_payload, fee_payload = await asyncio.gather(
@@ -513,7 +469,7 @@ class RateCollector:
     async def collect(self) -> RateSnapshot:
         collection_started_at = datetime.now(UTC)
         altyn, rapira = await asyncio.gather(
-            self.fetch_altyn_quote(ALTYN_REFERENCE_AMOUNT_RUB, wait_for_slot=True),
+            self.fetch_altyn_reference_quote(),
             self.fetch_rapira_quote(),
         )
         return RateSnapshot(

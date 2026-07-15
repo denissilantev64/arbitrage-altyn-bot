@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
-from unittest.mock import AsyncMock
 
 import pytest
 from aiogram.fsm.storage.base import BaseEventIsolation
@@ -51,7 +50,7 @@ async def test_supervisor_treats_normal_polling_stop_as_failure() -> None:
 def test_dispatcher_uses_event_isolation() -> None:
     repository = SQLiteRepository(":memory:")
 
-    dispatcher = build_dispatcher(repository, AsyncMock())
+    dispatcher = build_dispatcher(repository)
 
     isolation: BaseEventIsolation = dispatcher.fsm.events_isolation
     assert isinstance(isolation, SimpleEventIsolation)

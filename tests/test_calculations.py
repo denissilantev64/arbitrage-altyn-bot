@@ -75,7 +75,7 @@ def test_negative_supported_direction_is_returned_without_reverse_selection() ->
     assert result.net_spread_percent < 0
 
 
-def test_calculate_amount_uses_exact_quote_and_deducts_network_fee_once() -> None:
+def test_calculate_amount_uses_cached_quote_and_deducts_network_fee_once() -> None:
     market = snapshot(
         amount="1000000",
         altyn_rate="79.88",
@@ -83,25 +83,27 @@ def test_calculate_amount_uses_exact_quote_and_deducts_network_fee_once() -> Non
         rapira_bid="80.02",
         rapira_fee="0.001",
     )
+    requested_amount = Decimal("100000")
 
-    result = calculate_amount(market)
+    result = calculate_amount(market, requested_amount)
 
-    expected_bought = Decimal("1000000") / Decimal("79.88")
+    expected_bought = requested_amount / Decimal("79.88")
     expected_to_sell = expected_bought - Decimal("3")
-    expected_final = expected_to_sell * Decimal("80.02") * Decimal("0.999")
-    assert result.amount_rub == Decimal("1000000")
+    expected_effective_bid = Decimal("80.02") * Decimal("0.999")
+    expected_final = expected_to_sell * expected_effective_bid
+    assert market.altyn.amount_rub == Decimal("1000000")
+    assert result.amount_rub == requested_amount
     assert result.usdt_bought == expected_bought
     assert result.network_fee_usdt == Decimal("3")
     assert result.usdt_to_sell == expected_to_sell
     assert result.final_rub == expected_final
-    assert result.profit_rub == expected_final - Decimal("1000000")
-    assert result.profit_percent == result.profit_rub / Decimal("1000000") * 100
+    assert result.profit_rub == expected_final - requested_amount
+    assert result.profit_percent == result.profit_rub / requested_amount * 100
 
 
 @pytest.mark.parametrize("network_fee", ["10", "10.01"])
 def test_calculate_amount_rejects_fee_that_leaves_no_usdt(network_fee: str) -> None:
     market = snapshot(
-        amount="100",
         altyn_rate="10",
         network_fee=network_fee,
         rapira_bid="11",
@@ -109,10 +111,10 @@ def test_calculate_amount_rejects_fee_that_leaves_no_usdt(network_fee: str) -> N
     )
 
     with pytest.raises(InsufficientAmountError, match="network fee"):
-        calculate_amount(market)
+        calculate_amount(market, Decimal("100"))
 
 
 @pytest.mark.parametrize("amount", ["0.001", "1000000000000.01"])
-def test_calculate_amount_rejects_out_of_range_quote_amount(amount: str) -> None:
+def test_calculate_amount_rejects_out_of_range_requested_amount(amount: str) -> None:
     with pytest.raises(InvalidAmountError):
-        calculate_amount(snapshot(amount=amount))
+        calculate_amount(snapshot(), Decimal(amount))

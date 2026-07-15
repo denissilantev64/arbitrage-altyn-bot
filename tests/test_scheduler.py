@@ -13,7 +13,6 @@ from aiogram.methods import SendMessage
 
 import arbitrage_bot.scheduler as scheduler_module
 from arbitrage_bot.constants import (
-    ALTYN_MIN_REQUEST_INTERVAL_SECONDS,
     HTTP_TIMEOUT_SECONDS,
     MORNING_BROADCAST_RETRY_SECONDS,
     RATE_MAX_AGE_SECONDS,
@@ -58,7 +57,6 @@ def test_runtime_intervals_keep_market_refresh_and_broadcast_retry_independent()
     assert RATE_MAX_AGE_SECONDS == 2 * 60
     assert MORNING_BROADCAST_RETRY_SECONDS == 60
     assert RATE_MAX_AGE_SECONDS >= RATE_REFRESH_SECONDS + HTTP_TIMEOUT_SECONDS
-    assert 86_400 / ALTYN_MIN_REQUEST_INTERVAL_SECONDS < 10_000
 
 
 async def test_rate_refresh_loop_waits_one_minute_between_collections(
