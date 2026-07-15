@@ -17,7 +17,6 @@ from aiogram.enums import ChatType, ParseMode
 from aiogram.methods import SendMessage, TelegramMethod
 from aiogram.types import (
     Chat,
-    InlineKeyboardMarkup,
     Message,
     ReplyKeyboardMarkup,
     Update,
@@ -26,7 +25,6 @@ from aiogram.types import (
 
 from arbitrage_bot.application import build_dispatcher
 from arbitrage_bot.calculations import calculate_amount, calculate_spread
-from arbitrage_bot.config import Settings
 from arbitrage_bot.domain import AltynBuyQuote, BuyFeeMode, Exchange, ExchangeQuote, RateSnapshot
 from arbitrage_bot.errors import MarketDataError
 from arbitrage_bot.formatting import format_spread_message
@@ -34,7 +32,6 @@ from arbitrage_bot.keyboards import (
     CALCULATE_BUTTON,
     SHOW_SPREAD_BUTTON,
     SUBSCRIBE_BUTTON,
-    SUPPORT_BUTTON,
     UNSUBSCRIBE_BUTTON,
 )
 from arbitrage_bot.repository import SQLiteRepository
@@ -45,13 +42,11 @@ from arbitrage_bot.texts import (
     RATES_UNAVAILABLE_TEXT,
     START_TEXT,
     SUBSCRIBED_TEXT,
-    SUPPORT_TEXT,
     TOO_MANY_REQUESTS_TEXT,
     UNSUBSCRIBED_TEXT,
 )
 
 _CHAT_ID = 1001
-_SUPPORT_URL = "https://t.me/vardumyans"
 
 
 class RecordingSession(BaseSession):
@@ -149,18 +144,9 @@ def _reply_button_texts(message: SendMessage) -> set[str]:
     return {button.text for row in markup.keyboard for button in row}
 
 
-def _assert_support_link(message: SendMessage) -> None:
-    assert message.text == SUPPORT_TEXT
-    markup = message.reply_markup
-    assert isinstance(markup, InlineKeyboardMarkup)
-    assert len(markup.inline_keyboard) == 1
-    assert len(markup.inline_keyboard[0]) == 1
-    assert markup.inline_keyboard[0][0].url == _SUPPORT_URL
-
-
 def test_command_texts_match_the_public_menu_copy() -> None:
     assert ("В расчете по сумме персональная комиссия Altyn уже включена в курс.") in START_TEXT
-    assert START_TEXT.endswith("Можно также нажать «Показать спред» или «Поддержка».")
+    assert "Поддержка" not in START_TEXT
     assert "Exchange" not in START_TEXT
     assert "🇧🇾" not in START_TEXT
     assert HELP_TEXT.endswith("/help - команды бота")
@@ -179,15 +165,9 @@ async def test_all_requested_private_chat_flows(tmp_path: Path) -> None:
         session=session,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
-    settings = Settings(
-        telegram_bot_token=bot.token,
-        altyn_arbitrage_token="a" * 64,
-        database_path=tmp_path / "handlers.sqlite3",
-        support_url=_SUPPORT_URL,
-    )
     quote_provider = AsyncMock()
     quote_provider.fetch_altyn_quote.return_value = snapshot.altyn
-    dispatcher = build_dispatcher(repository, settings, quote_provider)
+    dispatcher = build_dispatcher(repository, quote_provider)
     harness = HandlerHarness(bot, dispatcher, repository, session)
 
     try:
@@ -195,6 +175,7 @@ async def test_all_requested_private_chat_flows(tmp_path: Path) -> None:
         assert len(replies) == 1
         assert replies[0].text == START_TEXT
         assert UNSUBSCRIBE_BUTTON in _reply_button_texts(replies[0])
+        assert "Поддержка" not in _reply_button_texts(replies[0])
         assert await repository.is_subscribed(_CHAT_ID) is True
 
         spread = calculate_spread(snapshot)
@@ -240,9 +221,9 @@ async def test_all_requested_private_chat_flows(tmp_path: Path) -> None:
         replies = await harness.feed("/help")
         assert [reply.text for reply in replies] == [HELP_TEXT]
 
-        replies = await harness.feed(SUPPORT_BUTTON)
-        assert len(replies) == 1
-        _assert_support_link(replies[0])
+        replies = await harness.feed("Поддержка")
+        assert [reply.text for reply in replies] == [HELP_TEXT]
+        assert "Поддержка" not in _reply_button_texts(replies[0])
     finally:
         await dispatcher.storage.close()
         await bot.session.close()
@@ -257,19 +238,13 @@ async def test_amount_request_validates_input_and_handles_altyn_failure(tmp_path
 
     session = RecordingSession()
     bot = Bot("123456789:" + "A" * 35, session=session)
-    settings = Settings(
-        telegram_bot_token=bot.token,
-        altyn_arbitrage_token="a" * 64,
-        database_path=tmp_path / "handler-errors.sqlite3",
-        support_url=_SUPPORT_URL,
-    )
     quote_provider = AsyncMock()
     quote_provider.fetch_altyn_quote.side_effect = MarketDataError(
         "altyn",
         "http_status",
         "HTTP request failed with status 429",
     )
-    dispatcher = build_dispatcher(repository, settings, quote_provider)
+    dispatcher = build_dispatcher(repository, quote_provider)
     harness = HandlerHarness(bot, dispatcher, repository, session)
 
     try:

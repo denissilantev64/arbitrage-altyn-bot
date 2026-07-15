@@ -10,7 +10,7 @@ Telegram-бот для мониторинга направления `Altyn -> R
 - `/subscribe`, `/unsubscribe` — изменить состояние утренней подписки.
 - `/help` — показать команды бота.
 
-Постоянное меню содержит «Показать спред», «Рассчитать прибыль», динамическую кнопку подписки и «Поддержка». Кнопка «Поддержка» показывает ссылку на Telegram-аккаунт поддержки.
+Постоянное меню содержит «Показать спред», «Рассчитать прибыль» и динамическую кнопку подписки.
 
 ## Финансовая модель
 
@@ -75,11 +75,10 @@ Runtime env-файл содержит только:
 ```dotenv
 TELEGRAM_BOT_TOKEN=...
 DATABASE_PATH=/var/lib/arbitrage-altyn-bot/arbitrage-bot.sqlite3
-SUPPORT_URL=https://t.me/vardumyans
 ALTYN_ARBITRAGE_TOKEN=<64 lowercase hexadecimal characters>
 ```
 
-Это четыре обязательные runtime-переменные. `ALTYN_ARBITRAGE_TOKEN` является секретом приватного API и должен находиться только на production-сервере в файле с правами `0600`; его нельзя коммитить, передавать в URL или копировать в workstation `.env`.
+Это три обязательные runtime-переменные. `ALTYN_ARBITRAGE_TOKEN` является секретом приватного API и должен находиться только на production-сервере в файле с правами `0600`; его нельзя коммитить, передавать в URL или копировать в workstation `.env`.
 
 Входящий порт не нужен: бот использует Telegram long polling.
 
@@ -123,7 +122,7 @@ sudo chown -R root:root /opt/arbitrage-altyn-bot
 sudo chmod -R go-w /opt/arbitrage-altyn-bot
 ```
 
-Создайте `/etc/arbitrage-altyn-bot/bot.env` только с четырьмя runtime-переменными из примера выше. Не копируйте workstation `.env`, потому что он также может содержать реквизиты доступа к серверу. Значение `ALTYN_ARBITRAGE_TOKEN` добавьте непосредственно на сервере и не выводите в терминал или журнал.
+Создайте `/etc/arbitrage-altyn-bot/bot.env` только с тремя runtime-переменными из примера выше. Не копируйте workstation `.env`, потому что он также может содержать реквизиты доступа к серверу. Значение `ALTYN_ARBITRAGE_TOKEN` добавьте непосредственно на сервере и не выводите в терминал или журнал.
 
 ```bash
 sudo install -o root -g root -m 0600 /dev/null \

@@ -13,7 +13,6 @@ from aiogram.types import ErrorEvent, Message
 
 from .amounts import parse_amount_rub
 from .calculations import calculate_amount, calculate_spread
-from .config import Settings
 from .constants import RATE_MAX_AGE_SECONDS
 from .domain import AltynBuyQuote, RateSnapshot
 from .errors import (
@@ -27,10 +26,8 @@ from .keyboards import (
     CALCULATE_BUTTON,
     SHOW_SPREAD_BUTTON,
     SUBSCRIBE_BUTTON,
-    SUPPORT_BUTTON,
     UNSUBSCRIBE_BUTTON,
     main_keyboard,
-    support_keyboard,
 )
 from .repository import SQLiteRepository
 from .texts import (
@@ -42,7 +39,6 @@ from .texts import (
     RATES_UNAVAILABLE_TEXT,
     START_TEXT,
     SUBSCRIBED_TEXT,
-    SUPPORT_TEXT,
     TOO_MANY_REQUESTS_TEXT,
     UNSUBSCRIBED_TEXT,
 )
@@ -60,7 +56,6 @@ class ProfitInput(StatesGroup):
 
 def create_router(
     repository: SQLiteRepository,
-    settings: Settings,
     quote_provider: AltynQuoteProvider,
 ) -> Router:
     router = Router(name="telegram-handlers")
@@ -170,12 +165,6 @@ def create_router(
     async def unsubscribe_button_handler(message: Message, state: FSMContext) -> None:
         await state.clear()
         await set_subscription(message, False)
-
-    @router.message(F.text == SUPPORT_BUTTON)
-    async def support_button_handler(message: Message, state: FSMContext) -> None:
-        await state.clear()
-        await ensure_user(message)
-        await message.answer(SUPPORT_TEXT, reply_markup=support_keyboard(settings.support_url))
 
     @router.message(ProfitInput.waiting_for_amount)
     async def amount_input_handler(message: Message, state: FSMContext) -> None:

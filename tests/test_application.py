@@ -50,14 +50,8 @@ async def test_supervisor_treats_normal_polling_stop_as_failure() -> None:
 
 def test_dispatcher_uses_event_isolation() -> None:
     repository = SQLiteRepository(":memory:")
-    settings = Settings(
-        telegram_bot_token="123456789:test-token",
-        altyn_arbitrage_token="a" * 64,
-        database_path=Path(":memory:"),
-        support_url="https://t.me/vardumyans",
-    )
 
-    dispatcher = build_dispatcher(repository, settings, AsyncMock())
+    dispatcher = build_dispatcher(repository, AsyncMock())
 
     isolation: BaseEventIsolation = dispatcher.fsm.events_isolation
     assert isinstance(isolation, SimpleEventIsolation)
@@ -121,7 +115,6 @@ async def test_run_passes_altyn_token_to_collector(
         telegram_bot_token="123456789:test-token",
         altyn_arbitrage_token="a" * 64,
         database_path=tmp_path / "bot.sqlite3",
-        support_url="https://t.me/vardumyans",
     )
 
     with pytest.raises(ExpectedStop):

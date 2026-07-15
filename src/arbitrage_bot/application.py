@@ -52,7 +52,7 @@ async def run(settings: Settings) -> None:
                     link_preview_is_disabled=True,
                 ),
             )
-            dispatcher = build_dispatcher(repository, settings, collector)
+            dispatcher = build_dispatcher(repository, collector)
             stop_event = asyncio.Event()
             polling_task: asyncio.Task[None] | None = None
             rate_task: asyncio.Task[None] | None = None
@@ -109,14 +109,13 @@ def _ensure_database_directory(database_path: Path) -> None:
 
 def build_dispatcher(
     repository: SQLiteRepository,
-    settings: Settings,
     collector: RateCollector,
 ) -> Dispatcher:
     dispatcher = Dispatcher(
         storage=MemoryStorage(),
         events_isolation=SimpleEventIsolation(),
     )
-    dispatcher.include_router(create_router(repository, settings, collector))
+    dispatcher.include_router(create_router(repository, collector))
     return dispatcher
 
 
