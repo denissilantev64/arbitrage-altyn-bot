@@ -22,8 +22,10 @@ from .keyboards import (
     CALCULATE_BUTTON,
     SHOW_SPREAD_BUTTON,
     SUBSCRIBE_BUTTON,
+    SUPPORT_BUTTON,
     UNSUBSCRIBE_BUTTON,
     main_keyboard,
+    support_keyboard,
 )
 from .repository import SQLiteRepository
 from .texts import (
@@ -35,6 +37,7 @@ from .texts import (
     RATES_UNAVAILABLE_TEXT,
     START_TEXT,
     SUBSCRIBED_TEXT,
+    SUPPORT_TEXT,
     UNSUBSCRIBED_TEXT,
 )
 
@@ -47,6 +50,7 @@ class ProfitInput(StatesGroup):
 
 def create_router(
     repository: SQLiteRepository,
+    support_url: str,
 ) -> Router:
     router = Router(name="telegram-handlers")
     router.message.filter(F.chat.type == ChatType.PRIVATE)
@@ -132,6 +136,12 @@ def create_router(
     async def unsubscribe_button_handler(message: Message, state: FSMContext) -> None:
         await state.clear()
         await set_subscription(message, False)
+
+    @router.message(F.text == SUPPORT_BUTTON)
+    async def support_button_handler(message: Message, state: FSMContext) -> None:
+        await state.clear()
+        await ensure_user(message)
+        await message.answer(SUPPORT_TEXT, reply_markup=support_keyboard(support_url))
 
     @router.message(ProfitInput.waiting_for_amount)
     async def amount_input_handler(message: Message, state: FSMContext) -> None:

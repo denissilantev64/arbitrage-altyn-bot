@@ -16,6 +16,7 @@ from aiogram.enums import ChatType, ParseMode
 from aiogram.methods import SendMessage, TelegramMethod
 from aiogram.types import (
     Chat,
+    InlineKeyboardMarkup,
     Message,
     ReplyKeyboardMarkup,
     Update,
@@ -30,6 +31,7 @@ from arbitrage_bot.keyboards import (
     CALCULATE_BUTTON,
     SHOW_SPREAD_BUTTON,
     SUBSCRIBE_BUTTON,
+    SUPPORT_BUTTON,
     UNSUBSCRIBE_BUTTON,
 )
 from arbitrage_bot.repository import SQLiteRepository
@@ -41,10 +43,12 @@ from arbitrage_bot.texts import (
     RATES_UNAVAILABLE_TEXT,
     START_TEXT,
     SUBSCRIBED_TEXT,
+    SUPPORT_TEXT,
     UNSUBSCRIBED_TEXT,
 )
 
 _CHAT_ID = 1001
+_SUPPORT_URL = "https://t.me/manager_altyn_bot"
 
 
 class RecordingSession(BaseSession):
@@ -142,9 +146,20 @@ def _reply_button_texts(message: SendMessage) -> set[str]:
     return {button.text for row in markup.keyboard for button in row}
 
 
+def _assert_support_link(message: SendMessage) -> None:
+    assert message.text == SUPPORT_TEXT
+    markup = message.reply_markup
+    assert isinstance(markup, InlineKeyboardMarkup)
+    assert len(markup.inline_keyboard) == 1
+    assert len(markup.inline_keyboard[0]) == 1
+    button = markup.inline_keyboard[0][0]
+    assert button.text == "Написать в Telegram"
+    assert button.url == _SUPPORT_URL
+
+
 def test_command_texts_match_the_public_menu_copy() -> None:
     assert ("В расчете по сумме персональная комиссия Altyn уже включена в курс.") in START_TEXT
-    assert "Поддержка" not in START_TEXT
+    assert START_TEXT.endswith("Можно также нажать «Показать спред» или «Поддержка».")
     assert "Exchange" not in START_TEXT
     assert "🇧🇾" not in START_TEXT
     assert HELP_TEXT.endswith("/help - команды бота")
@@ -163,7 +178,7 @@ async def test_all_requested_private_chat_flows(tmp_path: Path) -> None:
         session=session,
         default=DefaultBotProperties(parse_mode=ParseMode.HTML),
     )
-    dispatcher = build_dispatcher(repository)
+    dispatcher = build_dispatcher(repository, _SUPPORT_URL)
     harness = HandlerHarness(bot, dispatcher, repository, session)
 
     try:
@@ -171,7 +186,7 @@ async def test_all_requested_private_chat_flows(tmp_path: Path) -> None:
         assert len(replies) == 1
         assert replies[0].text == START_TEXT
         assert UNSUBSCRIBE_BUTTON in _reply_button_texts(replies[0])
-        assert "Поддержка" not in _reply_button_texts(replies[0])
+        assert SUPPORT_BUTTON in _reply_button_texts(replies[0])
         assert await repository.is_subscribed(_CHAT_ID) is True
 
         spread = calculate_spread(snapshot)
@@ -222,9 +237,9 @@ async def test_all_requested_private_chat_flows(tmp_path: Path) -> None:
         replies = await harness.feed("/help")
         assert [reply.text for reply in replies] == [HELP_TEXT]
 
-        replies = await harness.feed("Поддержка")
-        assert [reply.text for reply in replies] == [HELP_TEXT]
-        assert "Поддержка" not in _reply_button_texts(replies[0])
+        replies = await harness.feed(SUPPORT_BUTTON)
+        assert len(replies) == 1
+        _assert_support_link(replies[0])
     finally:
         await dispatcher.storage.close()
         await bot.session.close()
@@ -239,7 +254,7 @@ async def test_amount_request_validates_input_and_requires_fresh_snapshot(tmp_pa
 
     session = RecordingSession()
     bot = Bot("123456789:" + "A" * 35, session=session)
-    dispatcher = build_dispatcher(repository)
+    dispatcher = build_dispatcher(repository, _SUPPORT_URL)
     harness = HandlerHarness(bot, dispatcher, repository, session)
 
     try:

@@ -82,7 +82,7 @@ async def test_supervisor_returns_only_after_explicit_shutdown_request() -> None
 def test_dispatcher_uses_event_isolation() -> None:
     repository = SQLiteRepository(":memory:")
 
-    dispatcher = build_dispatcher(repository)
+    dispatcher = build_dispatcher(repository, "https://t.me/manager_altyn_bot")
 
     isolation: BaseEventIsolation = dispatcher.fsm.events_isolation
     assert isinstance(isolation, SimpleEventIsolation)
@@ -146,6 +146,7 @@ async def test_run_passes_altyn_token_to_collector(
         telegram_bot_token="123456789:test-token",
         altyn_arbitrage_token="a" * 64,
         database_path=tmp_path / "bot.sqlite3",
+        support_url="https://t.me/manager_altyn_bot",
     )
 
     with pytest.raises(ExpectedStop):

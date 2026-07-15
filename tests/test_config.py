@@ -11,6 +11,7 @@ _VALID_ENV = {
     "TELEGRAM_BOT_TOKEN": "123456:test-token-value",
     "ALTYN_ARBITRAGE_TOKEN": "a" * 64,
     "DATABASE_PATH": "data/bot.sqlite3",
+    "SUPPORT_URL": "https://t.me/manager_altyn_bot",
 }
 
 
@@ -46,7 +47,8 @@ def test_settings_loads_values_from_explicit_dotenv(
     dotenv_path.write_text(
         "TELEGRAM_BOT_TOKEN=dotenv-test-token\n"
         f"ALTYN_ARBITRAGE_TOKEN={'b' * 64}\n"
-        "DATABASE_PATH=~/arbitrage-test.sqlite3\n",
+        "DATABASE_PATH=~/arbitrage-test.sqlite3\n"
+        "SUPPORT_URL=https://t.me/dotenv_support\n",
         encoding="utf-8",
     )
 
@@ -55,6 +57,7 @@ def test_settings_loads_values_from_explicit_dotenv(
     assert settings.telegram_bot_token == "dotenv-test-token"
     assert settings.altyn_arbitrage_token == "b" * 64
     assert settings.database_path == Path("~/arbitrage-test.sqlite3").expanduser()
+    assert settings.support_url == "https://t.me/dotenv_support"
 
 
 def test_environment_takes_precedence_over_dotenv(
@@ -66,7 +69,8 @@ def test_environment_takes_precedence_over_dotenv(
     dotenv_path.write_text(
         "TELEGRAM_BOT_TOKEN=ignored-dotenv-token\n"
         f"ALTYN_ARBITRAGE_TOKEN={'b' * 64}\n"
-        "DATABASE_PATH=ignored.sqlite3\n",
+        "DATABASE_PATH=ignored.sqlite3\n"
+        "SUPPORT_URL=https://t.me/ignored_support\n",
         encoding="utf-8",
     )
 
@@ -75,6 +79,7 @@ def test_environment_takes_precedence_over_dotenv(
     assert settings.telegram_bot_token == _VALID_ENV["TELEGRAM_BOT_TOKEN"]
     assert settings.altyn_arbitrage_token == _VALID_ENV["ALTYN_ARBITRAGE_TOKEN"]
     assert settings.database_path == Path(_VALID_ENV["DATABASE_PATH"])
+    assert settings.support_url == _VALID_ENV["SUPPORT_URL"]
 
 
 @pytest.mark.parametrize(
@@ -106,3 +111,32 @@ def test_settings_repr_redacts_both_tokens(monkeypatch: pytest.MonkeyPatch, tmp_
 
     assert _VALID_ENV["TELEGRAM_BOT_TOKEN"] not in rendered
     assert _VALID_ENV["ALTYN_ARBITRAGE_TOKEN"] not in rendered
+
+
+@pytest.mark.parametrize(
+    "support_url",
+    [
+        "http://t.me/manager_altyn_bot",
+        "https://example.com/manager_altyn_bot",
+        "https://t.me",
+        "https://t.me/",
+        "https://t.me/a",
+        "https://t.me/manager_altyn_bot/extra",
+        "https://t.me/manager_altyn_bot?start=test",
+        "not-a-url",
+    ],
+)
+def test_settings_rejects_invalid_support_url_without_leaking_tokens(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    support_url: str,
+) -> None:
+    _set_valid_environment(monkeypatch)
+    monkeypatch.setenv("SUPPORT_URL", support_url)
+
+    with pytest.raises(ConfigurationError) as exc_info:
+        Settings.from_environment(tmp_path / "does-not-exist.env")
+
+    assert str(exc_info.value) == "SUPPORT_URL must be an https://t.me/<username> URL"
+    assert _VALID_ENV["TELEGRAM_BOT_TOKEN"] not in str(exc_info.value)
+    assert _VALID_ENV["ALTYN_ARBITRAGE_TOKEN"] not in str(exc_info.value)

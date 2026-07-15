@@ -1,11 +1,17 @@
 from __future__ import annotations
 
-from aiogram.types import KeyboardButton, ReplyKeyboardMarkup
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    ReplyKeyboardMarkup,
+)
 
 SHOW_SPREAD_BUTTON = "Показать спред"
 CALCULATE_BUTTON = "Рассчитать прибыль"
 SUBSCRIBE_BUTTON = "Включить подписку"
 UNSUBSCRIBE_BUTTON = "Отключить подписку"
+SUPPORT_BUTTON = "Поддержка"
 
 
 def main_keyboard(subscribed: bool) -> ReplyKeyboardMarkup:
@@ -17,8 +23,17 @@ def main_keyboard(subscribed: bool) -> ReplyKeyboardMarkup:
                 KeyboardButton(text=CALCULATE_BUTTON),
             ],
             [KeyboardButton(text=subscription_button)],
+            [KeyboardButton(text=SUPPORT_BUTTON)],
         ],
         resize_keyboard=True,
         is_persistent=True,
         input_field_placeholder="Выберите действие",
+    )
+
+
+def support_keyboard(support_url: str) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(
+        inline_keyboard=[
+            [InlineKeyboardButton(text="Написать в Telegram", url=support_url)],
+        ]
     )
